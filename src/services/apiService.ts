@@ -6,9 +6,9 @@ import {
   doc,
   setDoc,
   getDocs,
+  getDoc,
   onSnapshot,
   query,
-  orderBy,
   updateDoc,
   deleteDoc,
   writeBatch,
@@ -19,6 +19,28 @@ const TELEGRAM_CHANNEL_ID = '-1004411658114'; // @pcafedata
 
 const LOCAL_STORAGE_ORDERS_KEY = 'pcafe_all_orders';
 const LOCAL_STORAGE_MENU_KEY = 'pcafe_custom_menu';
+
+// Deep sanitizer: Firestore throws an error if any field in an object is `undefined`
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === undefined) {
+    return null as any;
+  }
+  if (data === null || typeof data !== 'object') {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => sanitizeForFirestore(item)) as any;
+  }
+  const cleanObj: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value !== undefined) {
+      cleanObj[key] = sanitizeForFirestore(value);
+    } else {
+      cleanObj[key] = null;
+    }
+  }
+  return cleanObj as T;
+}
 
 // Helper to format Persian date
 function formatPersianDate(isoString: string): string {
@@ -39,7 +61,7 @@ function formatPersianDate(isoString: string): string {
 }
 
 function formatPrice(num: number): string {
-  return num.toLocaleString('en-US') + ' تومان';
+  return (num || 0).toLocaleString('en-US') + ' تومان';
 }
 
 // Telegram Message Dispatcher
@@ -48,14 +70,14 @@ export async function sendTelegramNotification(order: Order): Promise<boolean> {
     const timeStr = formatPersianDate(order.createdAt);
     const typeStr =
       order.orderType === 'dine-in'
-        ? `🪑 <b>میز شماره ${order.tableNumber}</b> (سالن)`
+        ? `🪑 <b>میز شماره ${order.tableNumber || 1}</b> (سالن)`
         : '🛍️ <b>بیرون‌بر (Takeaway)</b>';
 
     let itemsList = '';
     order.items.forEach((item, idx) => {
       let customText = '';
       if (item.options) {
-        const opts = [];
+        const opts: string[] = [];
         if (item.options.milk) opts.push(`شیر: ${item.options.milk}`);
         if (item.options.sugar) opts.push(`شکر: ${item.options.sugar}`);
         if (item.options.extraShot) opts.push(`+ شات دوبل`);
@@ -104,7 +126,7 @@ ${order.notes ? `\n📝 <b>یادداشت مشتری:</b> <i>${order.notes}</i>`
   }
 }
 
-// Local storage fallback handlers
+// Local storage helpers
 export function getLocalOrders(): Order[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_ORDERS_KEY);
@@ -133,10 +155,9 @@ export function subscribeToOrders(
 ): () => void {
   try {
     const ordersCol = collection(db, 'orders');
-    const q = query(ordersCol, orderBy('createdAt', 'desc'));
 
     const unsubscribe = onSnapshot(
-      q,
+      ordersCol,
       (snapshot) => {
         const ordersList: Order[] = [];
         snapshot.forEach((docSnap) => {
@@ -146,11 +167,15 @@ export function subscribeToOrders(
             id: docSnap.id,
           });
         });
+
+        // Sort descending by creation date
+        ordersList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
         saveLocalOrders(ordersList);
         onOrdersChanged(ordersList);
       },
       (error) => {
-        console.warn('Firestore real-time subscription error, fallback to local/polling:', error);
+        console.warn('Firestore real-time subscription error, using local fallback:', error);
         if (onError) onError(error);
         onOrdersChanged(getLocalOrders());
       }
@@ -164,7 +189,7 @@ export function subscribeToOrders(
   }
 }
 
-// Get Menu (with cloud Firestore & local fallback)
+// Get Menu (Firestore with fallback)
 export async function fetchMenuApi(): Promise<MenuItem[]> {
   try {
     const menuCol = collection(db, 'menuItems');
@@ -192,17 +217,40 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
   return INITIAL_MENU_ITEMS;
 }
 
+// Add/Update/Delete Menu Items in Firestore
+export async function saveMenuItemApi(item: MenuItem): Promise<boolean> {
+  try {
+    const docRef = doc(db, 'menuItems', item.id);
+    await setDoc(docRef, sanitizeForFirestore(item));
+    return true;
+  } catch (e) {
+    console.warn('Firestore saveMenuItem error:', e);
+    return false;
+  }
+}
+
+export async function deleteMenuItemApi(itemId: string): Promise<boolean> {
+  try {
+    const docRef = doc(db, 'menuItems', itemId);
+    await deleteDoc(docRef);
+    return true;
+  } catch (e) {
+    console.warn('Firestore deleteMenuItem error:', e);
+    return false;
+  }
+}
+
 // Get Orders once (Firestore + Local)
 export async function fetchOrdersApi(): Promise<Order[]> {
   try {
     const ordersCol = collection(db, 'orders');
-    const q = query(ordersCol, orderBy('createdAt', 'desc'));
-    const snapshot = await getDocs(q);
+    const snapshot = await getDocs(ordersCol);
     if (!snapshot.empty) {
       const list: Order[] = [];
       snapshot.forEach((docSnap) => {
         list.push({ ...(docSnap.data() as Order), id: docSnap.id });
       });
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       saveLocalOrders(list);
       return list;
     }
@@ -230,6 +278,7 @@ export async function createOrderApi(payload: {
   notes?: string;
 }): Promise<{ success: boolean; order: Order; error?: string }> {
   try {
+    // 1. Determine next orderNumber across all existing orders
     const local = getLocalOrders();
     let maxOrderNum = 1000;
     for (const ord of local) {
@@ -238,19 +287,41 @@ export async function createOrderApi(payload: {
       }
     }
 
+    try {
+      const ordersCol = collection(db, 'orders');
+      const snapshot = await getDocs(ordersCol);
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        if (d && typeof d.orderNumber === 'number' && d.orderNumber > maxOrderNum) {
+          maxOrderNum = d.orderNumber;
+        }
+      });
+    } catch (e) {
+      // ignore if offline
+    }
+
     const orderNumber = maxOrderNum + 1;
     const now = new Date().toISOString();
-    const totalPrice = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    const totalPrice = payload.items.reduce((acc, it) => acc + (it.price || 0) * (it.quantity || 1), 0);
     const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    const newOrder: Order = {
+    const cleanedItems = payload.items.map((it) => ({
+      menuItemId: it.menuItemId || '',
+      name: it.name || '',
+      price: Number(it.price) || 0,
+      quantity: Number(it.quantity) || 1,
+      options: it.options || {},
+      specialNote: it.specialNote || '',
+    }));
+
+    const rawOrder: Order = {
       id: orderId,
       orderNumber,
       customerName: payload.customerName || 'مشتری گرامی',
       customerPhone: payload.customerPhone || '',
       orderType: payload.orderType,
-      tableNumber: payload.orderType === 'dine-in' ? (payload.tableNumber || 1) : undefined,
-      items: payload.items,
+      tableNumber: payload.orderType === 'dine-in' ? Number(payload.tableNumber || 1) : 0,
+      items: cleanedItems,
       totalPrice,
       status: 'pending',
       createdAt: now,
@@ -259,19 +330,22 @@ export async function createOrderApi(payload: {
       notes: payload.notes || '',
     };
 
-    // 1. Save to Cloud Firestore for instant cross-device live sync
+    // Sanitize completely to guarantee NO `undefined` reaches Firestore
+    const newOrder = sanitizeForFirestore<Order>(rawOrder);
+
+    // 2. Save to Cloud Firestore for instant cross-device sync
     try {
       const orderDocRef = doc(db, 'orders', orderId);
       await setDoc(orderDocRef, newOrder);
+      console.log('Order successfully synced to Firestore:', orderId);
     } catch (fsErr) {
-      console.warn('Firestore setDoc notice (will rely on local & telegram):', fsErr);
+      console.error('Firestore setDoc error:', fsErr);
     }
 
-    // 2. Send Telegram Notification
+    // 3. Send Telegram Notification
     const telegramOk = await sendTelegramNotification(newOrder);
     newOrder.telegramNotified = telegramOk;
 
-    // Update telegram notification status in Firestore if needed
     if (telegramOk) {
       try {
         const orderDocRef = doc(db, 'orders', orderId);
@@ -279,7 +353,7 @@ export async function createOrderApi(payload: {
       } catch (e) {}
     }
 
-    // 3. Save to local storage for instant UI response
+    // 4. Save to local storage for local immediate update
     saveLocalOrders([newOrder, ...local]);
 
     return { success: true, order: newOrder };

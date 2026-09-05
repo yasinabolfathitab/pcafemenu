@@ -25,6 +25,8 @@ import {
   getLocalOrders,
   subscribeToOrders,
   clearAllOrdersApi,
+  saveMenuItemApi,
+  deleteMenuItemApi,
 } from './services/apiService';
 
 export default function App() {
@@ -415,15 +417,18 @@ export default function App() {
 
   const handleToggleItemAvailability = async (itemId: string, currentStatus: boolean) => {
     try {
-      const res = await fetch(`/api/menu/${itemId}`, {
+      fetch(`/api/menu/${itemId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ isAvailable: !currentStatus }),
-      });
-      if (res.ok) {
-        const updated = await res.json();
+      }).catch(() => {});
+
+      const target = menuItems.find((it) => it.id === itemId);
+      if (target) {
+        const updatedItem = { ...target, isAvailable: !currentStatus };
+        await saveMenuItemApi(updatedItem);
         setMenuItems((prev) =>
-          prev.map((it) => (it.id === itemId ? updated : it))
+          prev.map((it) => (it.id === itemId ? updatedItem : it))
         );
         showToast(`وضعیت موجودی آیتم بروز شد.`);
       }
@@ -434,16 +439,34 @@ export default function App() {
 
   const handleAddItem = async (itemData: Partial<MenuItem>) => {
     try {
-      const res = await fetch('/api/menu', {
+      fetch('/api/menu', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(itemData),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        setMenuItems((prev) => [created, ...prev]);
-        showToast('آیتم جدید با موفقیت به منو اضافه شد.');
-      }
+      }).catch(() => {});
+
+      const newItem: MenuItem = {
+        id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        name: itemData.name || '',
+        enName: itemData.enName || '',
+        category: itemData.category || 'hot-coffee',
+        price: Number(itemData.price) || 0,
+        description: itemData.description || '',
+        ingredients: Array.isArray(itemData.ingredients)
+          ? itemData.ingredients
+          : typeof itemData.ingredients === 'string'
+          ? (itemData.ingredients as string).split(',').map((s) => s.trim()).filter(Boolean)
+          : [],
+        image: itemData.image || '',
+        prepTime: Number(itemData.prepTime) || 5,
+        isPopular: Boolean(itemData.isPopular),
+        isSpecial: Boolean(itemData.isSpecial),
+        isAvailable: itemData.isAvailable !== false,
+      };
+
+      await saveMenuItemApi(newItem);
+      setMenuItems((prev) => [newItem, ...prev]);
+      showToast('آیتم جدید با موفقیت به منو اضافه شد.');
     } catch (e) {
       console.error(e);
     }
@@ -451,15 +474,22 @@ export default function App() {
 
   const handleUpdateItem = async (itemId: string, itemData: Partial<MenuItem>) => {
     try {
-      const res = await fetch(`/api/menu/${itemId}`, {
+      fetch(`/api/menu/${itemId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(itemData),
-      });
-      if (res.ok) {
-        const updated = await res.json();
+      }).catch(() => {});
+
+      const target = menuItems.find((it) => it.id === itemId);
+      if (target) {
+        const updatedItem: MenuItem = {
+          ...target,
+          ...itemData,
+          id: itemId,
+        };
+        await saveMenuItemApi(updatedItem);
         setMenuItems((prev) =>
-          prev.map((it) => (it.id === itemId ? updated : it))
+          prev.map((it) => (it.id === itemId ? updatedItem : it))
         );
         showToast('تغییرات آیتم منو ذخیره گردید.');
       }
@@ -470,11 +500,10 @@ export default function App() {
 
   const handleDeleteItem = async (itemId: string) => {
     try {
-      const res = await fetch(`/api/menu/${itemId}`, { method: 'DELETE' });
-      if (res.ok) {
-        setMenuItems((prev) => prev.filter((it) => it.id !== itemId));
-        showToast('آیتم با موفقیت از منو حذف شد.');
-      }
+      fetch(`/api/menu/${itemId}`, { method: 'DELETE' }).catch(() => {});
+      await deleteMenuItemApi(itemId);
+      setMenuItems((prev) => prev.filter((it) => it.id !== itemId));
+      showToast('آیتم با موفقیت از منو حذف شد.');
     } catch (e) {
       console.error(e);
     }
