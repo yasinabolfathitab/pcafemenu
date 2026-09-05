@@ -23,6 +23,8 @@ import {
   updateOrderStatusApi,
   saveLocalOrders,
   getLocalOrders,
+  subscribeToOrders,
+  clearAllOrdersApi,
 } from './services/apiService';
 
 export default function App() {
@@ -131,12 +133,53 @@ export default function App() {
     }
   };
 
-  // Real-time EventSource (SSE) + Fast 3-second smart background sync
+  // Real-time Firestore Live Sync + EventSource + Background Sync
   useEffect(() => {
     fetchMenu();
-    fetchOrders(false);
 
-    // 1. Establish SSE Live Stream for sub-second cross-device push notifications
+    // 1. Primary: Real-time Cloud Firestore subscription for 100% instant cross-device synchronization
+    let previousOrdersMap = new Map<string, Order>();
+    const unsubscribeFirestore = subscribeToOrders((liveOrders) => {
+      setAllOrders((prev) => {
+        // Detect new incoming orders for admin alerts
+        if (isAdminLoggedInRef.current && previousOrdersMap.size > 0) {
+          for (const ord of liveOrders) {
+            if (!previousOrdersMap.has(ord.id)) {
+              playNewOrderChime();
+              showToast(`🔔 سفارش جدید #PC-${ord.orderNumber} (میز ${ord.tableNumber || 'بیرون‌بر'}) ثبت شد!`);
+            }
+          }
+        }
+
+        // Detect status change for customer or admin
+        if (previousOrdersMap.size > 0) {
+          for (const ord of liveOrders) {
+            const prevOrd = previousOrdersMap.get(ord.id);
+            if (prevOrd && prevOrd.status !== ord.status) {
+              const isMyOrder = myOrderIdsRef.current.includes(ord.id);
+              if (isMyOrder) {
+                playStatusUpdateChime();
+                const details = getStatusDetails(ord.status);
+                showToast(`☕ وضعیت سفارش شما #PC-${ord.orderNumber} تغییر کرد: «${details.label}»`);
+              } else if (isAdminLoggedInRef.current) {
+                const details = getStatusDetails(ord.status);
+                showToast(`وضعیت سفارش #PC-${ord.orderNumber} به «${details.label}» تغییر یافت.`);
+              }
+            }
+          }
+        }
+
+        // Update previous map
+        const newMap = new Map<string, Order>();
+        for (const o of liveOrders) newMap.set(o.id, o);
+        previousOrdersMap = newMap;
+
+        return liveOrders;
+      });
+      setIsLoading(false);
+    });
+
+    // 2. Establish SSE Live Stream (for server environment)
     let eventSource: EventSource | null = null;
     try {
       eventSource = new EventSource('/api/events');
@@ -151,7 +194,6 @@ export default function App() {
               return [newOrder, ...prev];
             });
 
-            // ONLY notify if user is an Admin logged in to manage the cafe
             if (isAdminLoggedInRef.current) {
               playNewOrderChime();
               showToast(`🔔 سفارش جدید #PC-${newOrder.orderNumber} (میز ${newOrder.tableNumber || 'بیرون‌بر'}) ثبت شد!`);
@@ -171,7 +213,6 @@ export default function App() {
               prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o))
             );
 
-            // Check if this status update belongs to THIS customer
             const isMyOrder = myOrderIdsRef.current.includes(updatedOrder.id);
             if (isMyOrder) {
               playStatusUpdateChime();
@@ -213,20 +254,21 @@ export default function App() {
         }
       });
 
-      eventSource.onerror = () => {
-        // SSE will automatically reconnect in background
-      };
+      eventSource.onerror = () => {};
     } catch (sseErr) {
-      console.warn('SSE not supported or failed to connect:', sseErr);
+      console.warn('SSE notice:', sseErr);
     }
 
-    // 2. High-speed 3-second background polling fallback to guarantee 100% real-time sync across devices
+    // 3. Fallback background polling
     const interval = setInterval(() => {
       fetchOrders(true);
-    }, 3000);
+    }, 4000);
 
     return () => {
       clearInterval(interval);
+      if (unsubscribeFirestore) {
+        unsubscribeFirestore();
+      }
       if (eventSource) {
         eventSource.close();
       }
@@ -441,6 +483,7 @@ export default function App() {
   const handleClearAllOrders = async (): Promise<boolean> => {
     try {
       fetch('/api/orders/all', { method: 'DELETE' }).catch(() => {});
+      await clearAllOrdersApi();
       setAllOrders([]);
       setMyOrderIds([]);
       saveLocalOrders([]);

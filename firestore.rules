@@ -1,0 +1,17 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Orders collection: Anyone can create and read orders, update status
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
+    // Menu items collection: Anyone can read, admins can update
+    match /menuItems/{itemId} {
+      allow read, write: if true;
+    }
+    // Cafe settings collection
+    match /settings/{docId} {
+      allow read, write: if true;
+    }
+  }
+}

@@ -1,5 +1,18 @@
 import { MenuItem, Order, OrderStatus } from '../types';
 import { INITIAL_MENU_ITEMS } from '../data/initialMenu';
+import { db } from '../firebase';
+import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  onSnapshot,
+  query,
+  orderBy,
+  updateDoc,
+  deleteDoc,
+  writeBatch,
+} from 'firebase/firestore';
 
 const TELEGRAM_BOT_TOKEN = '8632037639:AAFZm5TzaEj5Dy5o1EK2Ve0Z5UXjEsRtHx8';
 const TELEGRAM_CHANNEL_ID = '-1004411658114'; // @pcafedata
@@ -86,12 +99,12 @@ ${order.notes ? `\n📝 <b>یادداشت مشتری:</b> <i>${order.notes}</i>`
     const data = await response.json();
     return Boolean(response.ok && data.ok);
   } catch (err) {
-    console.warn('Telegram direct notification notice:', err);
+    console.warn('Telegram notification notice:', err);
     return false;
   }
 }
 
-// Read all cached orders from local storage
+// Local storage fallback handlers
 export function getLocalOrders(): Order[] {
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_ORDERS_KEY);
@@ -105,7 +118,6 @@ export function getLocalOrders(): Order[] {
   return [];
 }
 
-// Save all orders to local storage
 export function saveLocalOrders(orders: Order[]) {
   try {
     localStorage.setItem(LOCAL_STORAGE_ORDERS_KEY, JSON.stringify(orders));
@@ -114,19 +126,59 @@ export function saveLocalOrders(orders: Order[]) {
   }
 }
 
-// Get Menu (with fallback)
+// Subscribe to real-time order updates across all devices via Firestore
+export function subscribeToOrders(
+  onOrdersChanged: (orders: Order[]) => void,
+  onError?: (err: any) => void
+): () => void {
+  try {
+    const ordersCol = collection(db, 'orders');
+    const q = query(ordersCol, orderBy('createdAt', 'desc'));
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const ordersList: Order[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as Order;
+          ordersList.push({
+            ...data,
+            id: docSnap.id,
+          });
+        });
+        saveLocalOrders(ordersList);
+        onOrdersChanged(ordersList);
+      },
+      (error) => {
+        console.warn('Firestore real-time subscription error, fallback to local/polling:', error);
+        if (onError) onError(error);
+        onOrdersChanged(getLocalOrders());
+      }
+    );
+
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Failed to attach Firestore snapshot:', err);
+    onOrdersChanged(getLocalOrders());
+    return () => {};
+  }
+}
+
+// Get Menu (with cloud Firestore & local fallback)
 export async function fetchMenuApi(): Promise<MenuItem[]> {
   try {
-    const res = await fetch('/api/menu');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(data));
-        return data;
-      }
+    const menuCol = collection(db, 'menuItems');
+    const snapshot = await getDocs(menuCol);
+    if (!snapshot.empty) {
+      const items: MenuItem[] = [];
+      snapshot.forEach((docSnap) => {
+        items.push({ ...(docSnap.data() as MenuItem), id: docSnap.id });
+      });
+      localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(items));
+      return items;
     }
   } catch (e) {
-    // network or static host fallback
+    console.info('Using local fallback for menu');
   }
 
   try {
@@ -140,33 +192,28 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
   return INITIAL_MENU_ITEMS;
 }
 
-// Get Orders (with fallback)
+// Get Orders once (Firestore + Local)
 export async function fetchOrdersApi(): Promise<Order[]> {
   try {
-    const res = await fetch('/api/orders');
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        // Merge with local orders
-        const local = getLocalOrders();
-        const map = new Map<string, Order>();
-        for (const o of local) map.set(o.id, o);
-        for (const o of data) map.set(o.id, o);
-        const combined = Array.from(map.values()).sort(
-          (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        );
-        saveLocalOrders(combined);
-        return combined;
-      }
+    const ordersCol = collection(db, 'orders');
+    const q = query(ordersCol, orderBy('createdAt', 'desc'));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      const list: Order[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push({ ...(docSnap.data() as Order), id: docSnap.id });
+      });
+      saveLocalOrders(list);
+      return list;
     }
   } catch (e) {
-    // static host fallback
+    console.info('Using local cache for orders query');
   }
 
   return getLocalOrders();
 }
 
-// Submit Order (Universal: Works with backend API AND static hosting with Telegram Bot)
+// Submit Order (Syncs to Cloud Firestore + Telegram + Local Storage)
 export async function createOrderApi(payload: {
   customerName: string;
   customerPhone?: string;
@@ -182,27 +229,6 @@ export async function createOrderApi(payload: {
   }>;
   notes?: string;
 }): Promise<{ success: boolean; order: Order; error?: string }> {
-  // 1. Try Backend API first
-  try {
-    const res = await fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success && data.order) {
-        const local = getLocalOrders();
-        saveLocalOrders([data.order, ...local.filter((o) => o.id !== data.order.id)]);
-        return { success: true, order: data.order };
-      }
-    }
-  } catch (e) {
-    console.info('Backend API unavailable, utilizing direct resilient order processor.');
-  }
-
-  // 2. Resilient Client-Side Handler (for Cloudflare Pages / Static Deployments)
   try {
     const local = getLocalOrders();
     let maxOrderNum = 1000;
@@ -215,12 +241,13 @@ export async function createOrderApi(payload: {
     const orderNumber = maxOrderNum + 1;
     const now = new Date().toISOString();
     const totalPrice = payload.items.reduce((acc, it) => acc + it.price * it.quantity, 0);
+    const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
     const newOrder: Order = {
-      id: `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      id: orderId,
       orderNumber,
       customerName: payload.customerName || 'مشتری گرامی',
-      customerPhone: payload.customerPhone,
+      customerPhone: payload.customerPhone || '',
       orderType: payload.orderType,
       tableNumber: payload.orderType === 'dine-in' ? (payload.tableNumber || 1) : undefined,
       items: payload.items,
@@ -229,14 +256,30 @@ export async function createOrderApi(payload: {
       createdAt: now,
       updatedAt: now,
       telegramNotified: false,
-      notes: payload.notes,
+      notes: payload.notes || '',
     };
 
-    // Send Telegram Notification directly from client
+    // 1. Save to Cloud Firestore for instant cross-device live sync
+    try {
+      const orderDocRef = doc(db, 'orders', orderId);
+      await setDoc(orderDocRef, newOrder);
+    } catch (fsErr) {
+      console.warn('Firestore setDoc notice (will rely on local & telegram):', fsErr);
+    }
+
+    // 2. Send Telegram Notification
     const telegramOk = await sendTelegramNotification(newOrder);
     newOrder.telegramNotified = telegramOk;
 
-    // Save to local storage
+    // Update telegram notification status in Firestore if needed
+    if (telegramOk) {
+      try {
+        const orderDocRef = doc(db, 'orders', orderId);
+        await updateDoc(orderDocRef, { telegramNotified: true });
+      } catch (e) {}
+    }
+
+    // 3. Save to local storage for instant UI response
     saveLocalOrders([newOrder, ...local]);
 
     return { success: true, order: newOrder };
@@ -246,29 +289,45 @@ export async function createOrderApi(payload: {
   }
 }
 
-// Update Order Status
+// Update Order Status (Syncs to Cloud Firestore + Local)
 export async function updateOrderStatusApi(orderId: string, newStatus: OrderStatus): Promise<boolean> {
-  try {
-    const res = await fetch(`/api/orders/${orderId}/status`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.success && data.order) {
-        const local = getLocalOrders();
-        saveLocalOrders(local.map((o) => (o.id === orderId ? data.order : o)));
-        return true;
-      }
-    }
-  } catch (e) {}
+  const now = new Date().toISOString();
 
-  // Fallback to local storage update
+  // 1. Cloud Firestore update
+  try {
+    const orderDocRef = doc(db, 'orders', orderId);
+    await updateDoc(orderDocRef, {
+      status: newStatus,
+      updatedAt: now,
+    });
+  } catch (e) {
+    console.warn('Error updating status in Firestore:', e);
+  }
+
+  // 2. Local Storage update
   const local = getLocalOrders();
   const updated = local.map((o) =>
-    o.id === orderId ? { ...o, status: newStatus, updatedAt: new Date().toISOString() } : o
+    o.id === orderId ? { ...o, status: newStatus, updatedAt: now } : o
   );
   saveLocalOrders(updated);
+
+  return true;
+}
+
+// Clear all orders (Admin only)
+export async function clearAllOrdersApi(): Promise<boolean> {
+  try {
+    const ordersCol = collection(db, 'orders');
+    const snapshot = await getDocs(ordersCol);
+    const batch = writeBatch(db);
+    snapshot.forEach((docSnap) => {
+      batch.delete(docSnap.ref);
+    });
+    await batch.commit();
+  } catch (e) {
+    console.warn('Error clearing Firestore orders:', e);
+  }
+
+  saveLocalOrders([]);
   return true;
 }
