@@ -148,45 +148,62 @@ export function saveLocalOrders(orders: Order[]) {
   }
 }
 
-// Subscribe to real-time order updates across all devices via Firestore
+// Subscribe to real-time order updates across all devices
 export function subscribeToOrders(
   onOrdersChanged: (orders: Order[]) => void,
   onError?: (err: any) => void
 ): () => void {
+  let isUnsubscribed = false;
+  let firestoreUnsubscribe: (() => void) | null = null;
+
+  // 1. Try to use Firestore for instant updates if available
   try {
     const ordersCol = collection(db, 'orders');
-
-    const unsubscribe = onSnapshot(
+    firestoreUnsubscribe = onSnapshot(
       ordersCol,
       (snapshot) => {
+        if (isUnsubscribed) return;
         const ordersList: Order[] = [];
         snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as Order;
-          ordersList.push({
-            ...data,
-            id: docSnap.id,
-          });
+          ordersList.push({ ...(docSnap.data() as Order), id: docSnap.id });
         });
-
-        // Sort descending by creation date
         ordersList.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
         saveLocalOrders(ordersList);
         onOrdersChanged(ordersList);
       },
       (error) => {
-        console.warn('Firestore real-time subscription error, using local fallback:', error);
+        console.warn('Firestore real-time subscription error:', error);
         if (onError) onError(error);
-        onOrdersChanged(getLocalOrders());
       }
     );
-
-    return unsubscribe;
   } catch (err) {
     console.warn('Failed to attach Firestore snapshot:', err);
-    onOrdersChanged(getLocalOrders());
-    return () => {};
   }
+
+  // 2. GUARANTEED FALLBACK: Poll the Express API every 5 seconds
+  // This ensures the admin laptop gets the orders even if Firestore is blocked (e.g. in Iran)
+  // and SSE fails due to Cloud Run multi-instance routing.
+  const pollInterval = setInterval(async () => {
+    if (isUnsubscribed) return;
+    try {
+      const res = await fetch('/api/orders');
+      if (res.ok) {
+        const serverOrders: Order[] = await res.json();
+        if (Array.isArray(serverOrders)) {
+          saveLocalOrders(serverOrders);
+          onOrdersChanged(serverOrders);
+        }
+      }
+    } catch (e) {
+      // silently fail polling
+    }
+  }, 5000);
+
+  return () => {
+    isUnsubscribed = true;
+    if (firestoreUnsubscribe) firestoreUnsubscribe();
+    clearInterval(pollInterval);
+  };
 }
 
 // Get Menu (Firestore with fallback)
@@ -243,6 +260,21 @@ export async function deleteMenuItemApi(itemId: string): Promise<boolean> {
 // Get Orders once (Firestore + Local)
 export async function fetchOrdersApi(): Promise<Order[]> {
   try {
+    // 1. Try Express API first
+    const res = await fetch('/api/orders');
+    if (res.ok) {
+      const serverOrders: Order[] = await res.json();
+      if (Array.isArray(serverOrders)) {
+        saveLocalOrders(serverOrders);
+        return serverOrders;
+      }
+    }
+  } catch (err) {
+    console.warn('API fetch orders failed:', err);
+  }
+
+  // 2. Fallback to Firestore
+  try {
     const ordersCol = collection(db, 'orders');
     const snapshot = await getDocs(ordersCol);
     if (!snapshot.empty) {
@@ -278,92 +310,91 @@ export async function createOrderApi(payload: {
   notes?: string;
 }): Promise<{ success: boolean; order: Order; error?: string }> {
   try {
-    // 1. Determine next orderNumber across all existing orders
-    const local = getLocalOrders();
-    let maxOrderNum = 1000;
-    for (const ord of local) {
-      if (typeof ord.orderNumber === 'number' && ord.orderNumber > maxOrderNum) {
-        maxOrderNum = ord.orderNumber;
-      }
-    }
+    let finalOrder: Order | null = null;
+    let local = getLocalOrders();
 
+    // 1. Try Express Backend First (Single source of truth)
     try {
-      const ordersCol = collection(db, 'orders');
-      const snapshot = await getDocs(ordersCol);
-      snapshot.forEach((docSnap) => {
-        const d = docSnap.data();
-        if (d && typeof d.orderNumber === 'number' && d.orderNumber > maxOrderNum) {
-          maxOrderNum = d.orderNumber;
-        }
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
-    } catch (e) {
-      // ignore if offline
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.order) {
+          finalOrder = data.order;
+        }
+      }
+    } catch (apiErr) {
+      console.warn('Express API failed, using fallback creation:', apiErr);
     }
 
-    const orderNumber = maxOrderNum + 1;
-    const now = new Date().toISOString();
-    const totalPrice = payload.items.reduce((acc, it) => acc + (it.price || 0) * (it.quantity || 1), 0);
-    const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (!finalOrder) {
+      // Fallback: Create locally if API is completely dead
+      let maxOrderNum = 1000;
+      for (const ord of local) {
+        if (typeof ord.orderNumber === 'number' && ord.orderNumber > maxOrderNum) {
+          maxOrderNum = ord.orderNumber;
+        }
+      }
+      
+      const orderNumber = maxOrderNum + 1;
+      const now = new Date().toISOString();
+      const totalPrice = payload.items.reduce((acc, it) => acc + (it.price || 0) * (it.quantity || 1), 0);
+      const orderId = `ord_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
-    const cleanedItems = payload.items.map((it) => ({
-      menuItemId: it.menuItemId || '',
-      name: it.name || '',
-      price: Number(it.price) || 0,
-      quantity: Number(it.quantity) || 1,
-      options: it.options || {},
-      specialNote: it.specialNote || '',
-    }));
+      const cleanedItems = payload.items.map((it) => ({
+        menuItemId: it.menuItemId || '',
+        name: it.name || '',
+        price: Number(it.price) || 0,
+        quantity: Number(it.quantity) || 1,
+        options: it.options || {},
+        specialNote: it.specialNote || '',
+      }));
 
-    const rawOrder: Order = {
-      id: orderId,
-      orderNumber,
-      customerName: payload.customerName || 'مشتری گرامی',
-      customerPhone: payload.customerPhone || '',
-      orderType: payload.orderType,
-      tableNumber: payload.orderType === 'dine-in' ? Number(payload.tableNumber || 1) : 0,
-      items: cleanedItems,
-      totalPrice,
-      status: 'pending',
-      createdAt: now,
-      updatedAt: now,
-      telegramNotified: false,
-      notes: payload.notes || '',
-    };
-
-    // Sanitize completely to guarantee NO `undefined` reaches Firestore
-    const newOrder = sanitizeForFirestore<Order>(rawOrder);
+      finalOrder = sanitizeForFirestore<Order>({
+        id: orderId,
+        orderNumber,
+        customerName: payload.customerName || 'مشتری گرامی',
+        customerPhone: payload.customerPhone || '',
+        orderType: payload.orderType,
+        tableNumber: payload.orderType === 'dine-in' ? Number(payload.tableNumber || 1) : 0,
+        items: cleanedItems,
+        totalPrice,
+        status: 'pending',
+        createdAt: now,
+        updatedAt: now,
+        telegramNotified: false,
+        notes: payload.notes || '',
+      });
+    }
 
     // 2. Save to Cloud Firestore for instant cross-device sync
     try {
-      const orderDocRef = doc(db, 'orders', orderId);
-      await setDoc(orderDocRef, newOrder);
-      console.log('Order successfully synced to Firestore:', orderId);
+      const orderDocRef = doc(db, 'orders', finalOrder.id);
+      await setDoc(orderDocRef, finalOrder);
+      console.log('Order successfully synced to Firestore:', finalOrder.id);
     } catch (fsErr) {
       console.error('Firestore setDoc error:', fsErr);
     }
 
-    // Also notify Express server if running in full-stack mode
-    fetch('/api/orders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    }).catch(() => {});
-
-    // 3. Send Telegram Notification
-    const telegramOk = await sendTelegramNotification(newOrder);
-    newOrder.telegramNotified = telegramOk;
-
-    if (telegramOk) {
-      try {
-        const orderDocRef = doc(db, 'orders', orderId);
-        await updateDoc(orderDocRef, { telegramNotified: true });
-      } catch (e) {}
+    // 3. Send Telegram Notification (Only if Express didn't do it)
+    if (!finalOrder.telegramNotified) {
+      const telegramOk = await sendTelegramNotification(finalOrder);
+      finalOrder.telegramNotified = telegramOk;
+      if (telegramOk) {
+        try {
+          const orderDocRef = doc(db, 'orders', finalOrder.id);
+          await updateDoc(orderDocRef, { telegramNotified: true });
+        } catch (e) {}
+      }
     }
 
     // 4. Save to local storage for local immediate update
-    saveLocalOrders([newOrder, ...local]);
+    saveLocalOrders([finalOrder, ...local.filter(o => o.id !== finalOrder!.id)]);
 
-    return { success: true, order: newOrder };
+    return { success: true, order: finalOrder };
   } catch (err: any) {
     console.error('Order creation failed:', err);
     return { success: false, order: null as any, error: err.message || 'خطا در ثبت سفارش' };
@@ -374,7 +405,21 @@ export async function createOrderApi(payload: {
 export async function updateOrderStatusApi(orderId: string, newStatus: OrderStatus): Promise<boolean> {
   const now = new Date().toISOString();
 
-  // 1. Cloud Firestore update
+  // 1. Try Express API
+  try {
+    const res = await fetch(`/api/orders/${orderId}/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    if (!res.ok) {
+      console.warn('Express update status failed');
+    }
+  } catch (apiErr) {
+    console.warn('API update failed:', apiErr);
+  }
+
+  // 2. Cloud Firestore update
   try {
     const orderDocRef = doc(db, 'orders', orderId);
     await updateDoc(orderDocRef, {
@@ -385,14 +430,7 @@ export async function updateOrderStatusApi(orderId: string, newStatus: OrderStat
     console.warn('Error updating status in Firestore:', e);
   }
 
-  // Also notify Express server
-  fetch(`/api/orders/${orderId}/status`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: newStatus }),
-  }).catch(() => {});
-
-  // 2. Local Storage update
+  // 3. Local Storage update
   const local = getLocalOrders();
   const updated = local.map((o) =>
     o.id === orderId ? { ...o, status: newStatus, updatedAt: now } : o
