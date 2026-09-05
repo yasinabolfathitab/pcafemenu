@@ -342,6 +342,13 @@ export async function createOrderApi(payload: {
       console.error('Firestore setDoc error:', fsErr);
     }
 
+    // Also notify Express server if running in full-stack mode
+    fetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).catch(() => {});
+
     // 3. Send Telegram Notification
     const telegramOk = await sendTelegramNotification(newOrder);
     newOrder.telegramNotified = telegramOk;
@@ -377,6 +384,13 @@ export async function updateOrderStatusApi(orderId: string, newStatus: OrderStat
   } catch (e) {
     console.warn('Error updating status in Firestore:', e);
   }
+
+  // Also notify Express server
+  fetch(`/api/orders/${orderId}/status`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: newStatus }),
+  }).catch(() => {});
 
   // 2. Local Storage update
   const local = getLocalOrders();
