@@ -5,6 +5,8 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { INITIAL_MENU_ITEMS } from './src/data/initialMenu';
 import { MenuItem, Order, OrderStatus } from './src/types';
+import { db } from './src/firebase';
+import { collection, getDocs, doc, setDoc, updateDoc, onSnapshot, writeBatch } from 'firebase/firestore';
 
 dotenv.config();
 
@@ -155,6 +157,44 @@ function saveOrders(orders: Order[]) {
 
 let menuState: MenuItem[] = loadMenu();
 let ordersState: Order[] = loadOrders();
+
+// Sync ordersState with Firestore on startup and keep it updated
+try {
+  onSnapshot(collection(db, 'orders'), (snapshot) => {
+    const list: Order[] = [];
+    snapshot.forEach((docSnap) => {
+      list.push({ ...(docSnap.data() as Order), id: docSnap.id });
+    });
+    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    ordersState = list;
+    saveOrders(list);
+    broadcastSSE('orders_updated', { orders: list });
+  });
+} catch (e) {
+  console.warn('Could not connect server to Firestore, relying on local state.');
+}
+
+// Deep sanitizer: Firestore throws an error if any field in an object is `undefined`
+export function sanitizeForFirestore<T>(data: T): T {
+  if (data === undefined) {
+    return null as any;
+  }
+  if (data === null || typeof data !== 'object') {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => sanitizeForFirestore(item)) as any;
+  }
+  const cleanObj: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value !== undefined) {
+      cleanObj[key] = sanitizeForFirestore(value);
+    } else {
+      cleanObj[key] = null;
+    }
+  }
+  return cleanObj as T;
+}
 
 // Fetch latest updates or restore orders from Telegram channel (Database Sync)
 async function syncOrdersFromTelegram(): Promise<{ restored: number; error?: string }> {
@@ -480,7 +520,14 @@ async function startServer() {
   });
 
   // Clear all orders (Admin or reset)
-  app.delete('/api/orders/all', (req, res) => {
+  app.delete('/api/orders/all', async (req, res) => {
+    try {
+      const snapshot = await getDocs(collection(db, 'orders'));
+      const batch = writeBatch(db);
+      snapshot.forEach(docSnap => batch.delete(docSnap.ref));
+      await batch.commit();
+    } catch(e) {}
+    
     ordersState = [];
     saveOrders([]);
     broadcastSSE('orders_cleared', { orders: [] });
@@ -522,10 +569,6 @@ async function startServer() {
       ordersState.unshift(newOrder);
       saveOrders(ordersState);
 
-      // INSTANT BROADCAST TO ADMIN PANEL ON LAPTOP & CONNECTED SCREENS
-      broadcastSSE('new_order', { order: newOrder, timestamp: Date.now() });
-      broadcastSSE('orders_updated', { orders: ordersState });
-
       // Async send to Telegram channel with embedded DB record for permanent persistence
       const telegramMessage = formatOrderForTelegram(newOrder);
       const tgResult = await sendTelegramMessage(telegramMessage, newOrder);
@@ -534,6 +577,18 @@ async function startServer() {
         newOrder.telegramNotified = true;
         saveOrders(ordersState);
       }
+      
+      // Save to Firestore
+      try {
+        const orderRef = doc(db, 'orders', newOrder.id);
+        await setDoc(orderRef, sanitizeForFirestore(newOrder));
+      } catch (e) {
+        console.warn('Express failed to save to Firestore:', e);
+      }
+
+      // INSTANT BROADCAST TO ADMIN PANEL ON LAPTOP & CONNECTED SCREENS
+      broadcastSSE('new_order', { order: newOrder, timestamp: Date.now() });
+      broadcastSSE('orders_updated', { orders: ordersState });
 
       res.status(201).json({
         success: true,
@@ -561,6 +616,14 @@ async function startServer() {
     order.status = status;
     order.updatedAt = new Date().toISOString();
     saveOrders(ordersState);
+    
+    // Save to Firestore
+    try {
+      const orderRef = doc(db, 'orders', id);
+      await updateDoc(orderRef, { status: status, updatedAt: order.updatedAt });
+    } catch (e) {
+      console.warn('Express failed to update Firestore:', e);
+    }
 
     // Broadcast status change immediately to all clients
     broadcastSSE('order_status_updated', { order, status, timestamp: Date.now() });
