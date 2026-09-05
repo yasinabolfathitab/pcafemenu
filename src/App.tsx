@@ -17,6 +17,13 @@ import { INITIAL_MENU_ITEMS } from './data/initialMenu';
 import { Coffee, MapPin, Phone, Instagram, Send, Heart, Clock, ShoppingBag, ShieldCheck } from 'lucide-react';
 import { toPersianDigits, getStatusDetails } from './utils/formatters';
 import { playNewOrderChime, playStatusUpdateChime } from './utils/audio';
+import {
+  fetchMenuApi,
+  fetchOrdersApi,
+  updateOrderStatusApi,
+  saveLocalOrders,
+  getLocalOrders,
+} from './services/apiService';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'menu' | 'track' | 'admin'>('menu');
@@ -89,39 +96,33 @@ export default function App() {
     }, 4500);
   };
 
-  // Fetch Menu from API
+  // Fetch Menu from API (with fallback)
   const fetchMenu = async () => {
     try {
-      const res = await fetch('/api/menu');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          setMenuItems(data);
-        }
+      const items = await fetchMenuApi();
+      if (Array.isArray(items) && items.length > 0) {
+        setMenuItems(items);
       }
     } catch (e) {
       console.error('Error fetching menu:', e);
     }
   };
 
-  // Fetch Orders from API (Silent = true for background polling without spinner flicker)
+  // Fetch Orders from API (with fallback)
   const fetchOrders = async (silent = false) => {
     if (!silent) setIsLoading(true);
     try {
-      const res = await fetch('/api/orders');
-      if (res.ok) {
-        const data: Order[] = await res.json();
-        if (Array.isArray(data)) {
-          const seen = new Set<string>();
-          const uniqueOrders: Order[] = [];
-          for (const ord of data) {
-            if (ord && ord.id && !seen.has(ord.id)) {
-              seen.add(ord.id);
-              uniqueOrders.push(ord);
-            }
+      const data = await fetchOrdersApi();
+      if (Array.isArray(data)) {
+        const seen = new Set<string>();
+        const uniqueOrders: Order[] = [];
+        for (const ord of data) {
+          if (ord && ord.id && !seen.has(ord.id)) {
+            seen.add(ord.id);
+            uniqueOrders.push(ord);
           }
-          setAllOrders(uniqueOrders);
         }
+        setAllOrders(uniqueOrders);
       }
     } catch (e) {
       console.warn('Error fetching orders:', e);
@@ -360,18 +361,11 @@ export default function App() {
   // Admin Actions
   const handleUpdateOrderStatus = async (orderId: string, newStatus: OrderStatus) => {
     try {
-      const res = await fetch(`/api/orders/${orderId}/status`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAllOrders((prev) =>
-          prev.map((o) => (o.id === orderId ? data.order : o))
-        );
-        showToast('وضعیت سفارش بروزرسانی شد.');
-      }
+      await updateOrderStatusApi(orderId, newStatus);
+      setAllOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? { ...o, status: newStatus, updatedAt: new Date().toISOString() } : o))
+      );
+      showToast('وضعیت سفارش بروزرسانی شد.');
     } catch (e) {
       console.error(e);
     }
@@ -446,17 +440,16 @@ export default function App() {
 
   const handleClearAllOrders = async (): Promise<boolean> => {
     try {
-      const res = await fetch('/api/orders/all', { method: 'DELETE' });
-      if (res.ok) {
-        setAllOrders([]);
-        setMyOrderIds([]);
-        try {
-          localStorage.removeItem('pcafe_my_order_ids');
-          localStorage.removeItem('pcafe_client_orders');
-        } catch (e) {}
-        showToast('🗑️ تمامی سفارش‌ها با موفقیت پاکسازی شدند.');
-        return true;
-      }
+      fetch('/api/orders/all', { method: 'DELETE' }).catch(() => {});
+      setAllOrders([]);
+      setMyOrderIds([]);
+      saveLocalOrders([]);
+      try {
+        localStorage.removeItem('pcafe_my_order_ids');
+        localStorage.removeItem('pcafe_all_orders');
+      } catch (e) {}
+      showToast('🗑️ تمامی سفارش‌ها با موفقیت پاکسازی شدند.');
+      return true;
     } catch (e) {
       console.error(e);
     }

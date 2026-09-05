@@ -4,6 +4,7 @@ import { X, Trash2, Plus, Minus, ShoppingBag, Send, Coffee, Sparkles, CheckCircl
 import confetti from 'canvas-confetti';
 import { CartItem, Order } from '../types';
 import { formatPriceToman, toPersianDigits } from '../utils/formatters';
+import { createOrderApi } from '../services/apiService';
 
 interface CartDrawerProps {
   isOpen: boolean;
@@ -56,15 +57,9 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
         notes: notes.trim() || undefined,
       };
 
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || 'خطا در ثبت سفارش');
+      const result = await createOrderApi(payload);
+      if (!result.success || !result.order) {
+        throw new Error(result.error || 'خطا در ثبت سفارش');
       }
 
       // Fire festive celebratory confetti
@@ -76,7 +71,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
       });
 
       onClearCart();
-      onOrderSuccess(data.order);
+      onOrderSuccess(result.order);
       onClose();
     } catch (err: any) {
       console.error(err);
