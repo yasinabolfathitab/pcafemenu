@@ -387,41 +387,67 @@ async function startServer() {
   // Create Order
   app.post('/api/orders', async (req, res) => {
     try {
-      const { customerName, customerPhone, orderType, tableNumber, items, notes } = req.body;
+      const {
+        id: providedId,
+        orderNumber: providedOrderNumber,
+        customerName,
+        customerPhone,
+        orderType,
+        tableNumber,
+        items,
+        totalPrice: reqTotalPrice,
+        status: reqStatus,
+        createdAt: reqCreatedAt,
+        notes,
+      } = req.body;
 
       if (!items || !Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ error: 'سبد خرید خالی است' });
       }
 
-      const orderNumber = ordersState.length > 0 
-        ? Math.max(...ordersState.map(o => o.orderNumber || 1000)) + 1 
-        : 1001;
+      const orderNumber =
+        providedOrderNumber ||
+        (ordersState.length > 0
+          ? Math.max(...ordersState.map((o) => o.orderNumber || 1000)) + 1
+          : 1001);
 
-      const totalPrice = items.reduce((acc: number, item: any) => acc + (Number(item.price) * Number(item.quantity)), 0);
+      const calculatedTotal = items.reduce(
+        (acc: number, item: any) => acc + Number(item.price) * Number(item.quantity),
+        0
+      );
+      const totalPrice = reqTotalPrice || calculatedTotal;
+      const finalId =
+        providedId || `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      const now = reqCreatedAt || new Date().toISOString();
 
       const newOrder: Order = {
-        id: `ord_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        id: finalId,
         orderNumber,
         customerName: customerName || 'مشتری گرامی',
         customerPhone: customerPhone || undefined,
         orderType: orderType || 'dine-in',
-        tableNumber: orderType === 'takeaway' ? undefined : (tableNumber || 1),
+        tableNumber: orderType === 'takeaway' ? undefined : tableNumber || 1,
         items,
         totalPrice,
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        status: reqStatus || 'pending',
+        createdAt: now,
+        updatedAt: now,
         notes: notes || undefined,
       };
 
-      ordersState.unshift(newOrder);
+      const existingIndex = ordersState.findIndex((o) => o.id === finalId);
+      if (existingIndex >= 0) {
+        ordersState[existingIndex] = newOrder;
+      } else {
+        ordersState.unshift(newOrder);
+      }
       saveOrders(ordersState);
 
-      // Save to Supabase
+      // Save to Supabase (upsert)
       if (supabase && isSupabaseConfigured) {
         try {
           const sbPayload = mapAppOrderToSupabase(newOrder);
-          await supabase.from('orders').insert([sbPayload]);
+          await supabase.from('orders').upsert([sbPayload], { onConflict: 'id' });
         } catch (e) {
           console.warn('Express failed to save to Supabase:', e);
         }

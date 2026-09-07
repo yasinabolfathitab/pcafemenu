@@ -1,0 +1,54 @@
+{
+  "entities": {
+    "Order": {
+      "title": "Order",
+      "description": "Represents a cafe customer order",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique order identifier" },
+        "orderNumber": { "type": "number", "description": "Sequential customer receipt number" },
+        "customerName": { "type": "string", "description": "Customer name or title" },
+        "customerPhone": { "type": "string", "description": "Optional contact number" },
+        "orderType": { "type": "string", "enum": ["dine-in", "takeaway"], "description": "Dine in or takeaway" },
+        "tableNumber": { "type": "number", "description": "Table number if dine-in" },
+        "items": { "type": "array", "description": "List of ordered items" },
+        "totalPrice": { "type": "number", "description": "Total order amount in Toman" },
+        "status": { "type": "string", "enum": ["pending", "preparing", "ready", "completed", "cancelled"], "description": "Order status" },
+        "createdAt": { "type": "string", "description": "ISO creation timestamp" },
+        "updatedAt": { "type": "string", "description": "ISO update timestamp" },
+        "notes": { "type": "string", "description": "Customer special instructions" }
+      },
+      "required": ["id", "orderNumber", "orderType", "items", "totalPrice", "status", "createdAt"]
+    },
+    "MenuItem": {
+      "title": "MenuItem",
+      "description": "Represents a menu item in P Cafe",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "enName": { "type": "string" },
+        "category": { "type": "string" },
+        "price": { "type": "number" },
+        "description": { "type": "string" },
+        "ingredients": { "type": "array" },
+        "image": { "type": "string" },
+        "prepTime": { "type": "number" },
+        "isPopular": { "type": "boolean" },
+        "isSpecial": { "type": "boolean" },
+        "isAvailable": { "type": "boolean" }
+      },
+      "required": ["id", "name", "category", "price", "image", "isAvailable"]
+    }
+  },
+  "firestore": {
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Collection of all cafe orders"
+    },
+    "/menuItems/{itemId}": {
+      "schema": "MenuItem",
+      "description": "Collection of cafe menu items"
+    }
+  }
+}

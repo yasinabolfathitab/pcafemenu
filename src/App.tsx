@@ -23,18 +23,27 @@ import {
   updateOrderStatusApi,
   saveLocalOrders,
   getLocalOrders,
+  getLocalMyOrders,
+  saveLocalMyOrder,
   subscribeToOrders,
   clearAllOrdersApi,
   saveMenuItemApi,
   deleteMenuItemApi,
+  lookupOrderApi,
 } from './services/apiService';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'menu' | 'track' | 'admin'>('menu');
   const [menuItems, setMenuItems] = useState<MenuItem[]>(INITIAL_MENU_ITEMS);
   
-  // All Orders across the cafe (used by Admin Panel)
-  const [allOrders, setAllOrders] = useState<Order[]>([]);
+  // All Orders across the cafe (used by Admin Panel) - initialized from local cache for instant zero-lag render
+  const [allOrders, setAllOrders] = useState<Order[]>(() => {
+    try {
+      return getLocalOrders();
+    } catch {
+      return [];
+    }
+  });
   
   // Specific Order IDs placed by THIS customer/browser session
   const [myOrderIds, setMyOrderIds] = useState<string[]>(() => {
@@ -69,7 +78,20 @@ export default function App() {
   // Derived: Only this customer's orders for the Tracking view
   const myOrders = React.useMemo(() => {
     const idSet = new Set(myOrderIds);
-    return allOrders.filter((o) => idSet.has(o.id));
+    const matchedFromAll = allOrders.filter((o) => idSet.has(o.id));
+    const cachedMyOrders = getLocalMyOrders();
+
+    const orderMap = new Map<string, Order>();
+    for (const ord of cachedMyOrders) {
+      if (ord && ord.id) orderMap.set(ord.id, ord);
+    }
+    for (const ord of matchedFromAll) {
+      if (ord && ord.id) orderMap.set(ord.id, ord);
+    }
+
+    return Array.from(orderMap.values()).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
   }, [allOrders, myOrderIds]);
   
   // Modals
@@ -365,7 +387,8 @@ export default function App() {
       return updated;
     });
 
-    // 2. Add to allOrders cache
+    // 2. Add to local customer cache & allOrders cache
+    saveLocalMyOrder(newOrder);
     setAllOrders((prev) => [newOrder, ...prev.filter((o) => o.id !== newOrder.id)]);
 
     // 3. Clear customer's cart
@@ -379,22 +402,19 @@ export default function App() {
   // Lookup Order by ID / OrderNumber / Phone and attach to my orders
   const handleLookupOrder = async (query: string): Promise<boolean> => {
     try {
-      const res = await fetch(`/api/orders/lookup/${encodeURIComponent(query)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data && data.order) {
-          const foundOrder: Order = data.order;
-          setAllOrders((prev) => [foundOrder, ...prev.filter((o) => o.id !== foundOrder.id)]);
-          setMyOrderIds((prev) => {
-            if (prev.includes(foundOrder.id)) return prev;
-            const updated = [foundOrder.id, ...prev];
-            try {
-              localStorage.setItem('pcafe_my_order_ids', JSON.stringify(updated));
-            } catch (e) {}
-            return updated;
-          });
-          return true;
-        }
+      const foundOrder = await lookupOrderApi(query);
+      if (foundOrder) {
+        setAllOrders((prev) => [foundOrder, ...prev.filter((o) => o.id !== foundOrder.id)]);
+        setMyOrderIds((prev) => {
+          if (prev.includes(foundOrder.id)) return prev;
+          const updated = [foundOrder.id, ...prev];
+          try {
+            localStorage.setItem('pcafe_my_order_ids', JSON.stringify(updated));
+          } catch (e) {}
+          return updated;
+        });
+        saveLocalMyOrder(foundOrder);
+        return true;
       }
     } catch (e) {
       console.error('Lookup order error:', e);

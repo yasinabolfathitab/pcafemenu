@@ -1,6 +1,21 @@
 import { MenuItem, Order, OrderStatus } from '../types';
 import { INITIAL_MENU_ITEMS } from '../data/initialMenu';
 import {
+  collection,
+  doc,
+  setDoc,
+  getDocs,
+  getDoc,
+  updateDoc,
+  deleteDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  where,
+  writeBatch,
+} from 'firebase/firestore';
+import { db } from '../firebase';
+import {
   supabase,
   isSupabaseConfigured,
   mapSupabaseOrderToAppOrder,
@@ -10,28 +25,21 @@ import {
 } from '../supabase';
 
 const LOCAL_STORAGE_ORDERS_KEY = 'pcafe_all_orders';
+const LOCAL_STORAGE_MY_ORDERS_KEY = 'pcafe_my_orders';
 const LOCAL_STORAGE_MENU_KEY = 'pcafe_custom_menu';
 
-// Helper to format Persian date
-function formatPersianDate(isoString: string): string {
-  try {
-    const d = new Date(isoString);
-    return new Intl.DateTimeFormat('fa-IR-u-nu-latn', {
-      timeZone: 'Asia/Tehran',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    }).format(d);
-  } catch {
-    return isoString;
+// Helper to sanitize object for Firestore (Firestore rejects `undefined` values)
+export function sanitizeForFirestore(obj: any): any {
+  if (obj === undefined) return null;
+  if (obj === null || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(sanitizeForFirestore);
+  const out: Record<string, any> = {};
+  for (const [key, val] of Object.entries(obj)) {
+    if (val !== undefined) {
+      out[key] = sanitizeForFirestore(val);
+    }
   }
-}
-
-function formatPrice(num: number): string {
-  return (num || 0).toLocaleString('en-US') + ' تومان';
+  return out;
 }
 
 // Local storage helpers (Guarantees offline resilience and zero-lag experience)
@@ -50,23 +58,100 @@ export function getLocalOrders(): Order[] {
 
 export function saveLocalOrders(orders: Order[]) {
   try {
-    localStorage.setItem(LOCAL_STORAGE_ORDERS_KEY, JSON.stringify(orders));
+    const seen = new Set<string>();
+    const unique: Order[] = [];
+    for (const ord of orders) {
+      if (ord && ord.id && !seen.has(ord.id)) {
+        seen.add(ord.id);
+        unique.push(ord);
+      }
+    }
+    localStorage.setItem(LOCAL_STORAGE_ORDERS_KEY, JSON.stringify(unique));
   } catch (e) {
     console.warn('Error saving local orders:', e);
   }
 }
 
+// Customer private order cache helpers
+export function getLocalMyOrders(): Order[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_MY_ORDERS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {}
+  return [];
+}
+
+export function saveLocalMyOrder(order: Order) {
+  try {
+    const existing = getLocalMyOrders();
+    const updated = [order, ...existing.filter((o) => o.id !== order.id)];
+    localStorage.setItem(LOCAL_STORAGE_MY_ORDERS_KEY, JSON.stringify(updated));
+  } catch {}
+}
+
+export function updateLocalMyOrderStatus(orderId: string, status: OrderStatus) {
+  try {
+    const existing = getLocalMyOrders();
+    const updated = existing.map((o) =>
+      o.id === orderId ? { ...o, status, updatedAt: new Date().toISOString() } : o
+    );
+    localStorage.setItem(LOCAL_STORAGE_MY_ORDERS_KEY, JSON.stringify(updated));
+  } catch {}
+}
+
 // =========================================================================
-// Step 3 (Real-time): Supabase WebSockets Subscription for Cafe Admin Panel
+// Real-time Order Subscription (Firestore onSnapshot + Supabase Real-time)
 // =========================================================================
 export function subscribeToOrders(
   onOrdersChanged: (orders: Order[]) => void,
   onError?: (err: any) => void
 ): () => void {
   let isUnsubscribed = false;
+  let unsubscribeFirestore: (() => void) | null = null;
   let supabaseChannel: any = null;
 
-  // 1. Primary: Real-time Supabase PostgreSQL Changes WebSockets
+  // 1. Primary: Real-time Cloud Firestore subscription
+  // Works instantly across all devices on Cloudflare Pages, mobile, and laptop
+  try {
+    const ordersCol = collection(db, 'orders');
+    const q = query(ordersCol, orderBy('createdAt', 'desc'));
+
+    unsubscribeFirestore = onSnapshot(
+      q,
+      (snapshot) => {
+        if (isUnsubscribed) return;
+        const liveOrders: Order[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as Order;
+          liveOrders.push({
+            ...data,
+            id: docSnap.id,
+          });
+        });
+
+        // Save local cache
+        saveLocalOrders(liveOrders);
+        onOrdersChanged(liveOrders);
+      },
+      (err) => {
+        console.warn('Firestore onSnapshot notice:', err);
+        if (onError) onError(err);
+        // Fallback to fetch
+        fetchOrdersApi().then((data) => {
+          if (!isUnsubscribed && Array.isArray(data)) {
+            onOrdersChanged(data);
+          }
+        });
+      }
+    );
+  } catch (fsErr) {
+    console.warn('Failed to initialize Firestore listener:', fsErr);
+  }
+
+  // 2. Secondary: Real-time Supabase PostgreSQL Changes WebSockets (if configured)
   if (supabase && isSupabaseConfigured) {
     try {
       supabaseChannel = supabase
@@ -80,9 +165,6 @@ export function subscribeToOrders(
           },
           async (payload) => {
             if (isUnsubscribed) return;
-            console.log('⚡ Supabase WebSocket Real-time update:', payload.eventType);
-            
-            // Re-fetch orders using standard Supabase query to ensure sorted consistency
             try {
               const freshOrders = await fetchOrdersApi();
               if (!isUnsubscribed) {
@@ -93,35 +175,30 @@ export function subscribeToOrders(
             }
           }
         )
-        .subscribe((status, err) => {
-          if (status === 'SUBSCRIBED') {
-            console.log('✅ Supabase WebSockets connected to table "orders"');
-          } else if (status === 'CHANNEL_ERROR') {
-            console.warn('Supabase channel error:', err);
-            if (onError) onError(err);
-          }
-        });
+        .subscribe();
     } catch (wsErr) {
       console.warn('Failed to initialize Supabase WebSockets channel:', wsErr);
     }
   }
 
-  // 2. Auxiliary Polling Fallback (every 6 seconds)
-  // Ensures updates in case of internet instability, VPN disconnects, or before Supabase keys are configured
+  // 3. Fallback background sync polling (every 5 seconds)
   const pollInterval = setInterval(async () => {
     if (isUnsubscribed) return;
     try {
       const orders = await fetchOrdersApi();
-      if (!isUnsubscribed && Array.isArray(orders)) {
+      if (!isUnsubscribed && Array.isArray(orders) && orders.length > 0) {
         onOrdersChanged(orders);
       }
     } catch {
-      // ignore transient polling errors
+      // ignore
     }
-  }, 6000);
+  }, 5000);
 
   return () => {
     isUnsubscribed = true;
+    if (unsubscribeFirestore) {
+      unsubscribeFirestore();
+    }
     if (supabase && supabaseChannel) {
       supabase.removeChannel(supabaseChannel);
     }
@@ -130,30 +207,43 @@ export function subscribeToOrders(
 }
 
 // =========================================================================
-// Step 4 (Data Functions): Supabase Standard Operations (Menu & Orders)
+// Menu Operations (Firestore -> Supabase -> Express -> Local)
 // =========================================================================
 
-// 1. Get Menu (Supabase -> Local Storage -> Default Fallback)
 export async function fetchMenuApi(): Promise<MenuItem[]> {
+  // 1. Primary: Cloud Firestore
+  try {
+    const menuCol = collection(db, 'menuItems');
+    const snapshot = await getDocs(menuCol);
+    if (!snapshot.empty) {
+      const items: MenuItem[] = [];
+      snapshot.forEach((docSnap) => {
+        items.push({ ...(docSnap.data() as MenuItem), id: docSnap.id });
+      });
+      if (items.length > 0) {
+        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(items));
+        return items;
+      }
+    }
+  } catch (fsErr) {
+    console.warn('Firestore fetch menu notice:', fsErr);
+  }
+
+  // 2. Supabase
   if (supabase && isSupabaseConfigured) {
     try {
-      const { data, error } = await supabase
-        .from('menu_items')
-        .select('*');
-
+      const { data, error } = await supabase.from('menu_items').select('*');
       if (!error && data && data.length > 0) {
         const items = data.map(mapSupabaseMenuItemToApp);
         localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(items));
         return items;
-      } else if (error) {
-        console.warn('Supabase fetch menu warning:', error.message);
       }
     } catch (e) {
       console.warn('Supabase menu fetch exception:', e);
     }
   }
 
-  // Fallback to Express backend if running in dev
+  // 3. Fallback to Express backend if running
   try {
     const res = await fetch('/api/menu');
     if (res.ok) {
@@ -165,7 +255,7 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
     }
   } catch {}
 
-  // Fallback to local storage
+  // 4. Fallback to local storage
   try {
     const local = localStorage.getItem(LOCAL_STORAGE_MENU_KEY);
     if (local) {
@@ -177,9 +267,8 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
   return INITIAL_MENU_ITEMS;
 }
 
-// 2. Add / Update Menu Item in Supabase
 export async function saveMenuItemApi(item: MenuItem): Promise<boolean> {
-  // Update local storage first for instant optimistic UI
+  // 1. Local storage update
   try {
     const local = await fetchMenuApi();
     const idx = local.findIndex((i) => i.id === item.id);
@@ -193,22 +282,25 @@ export async function saveMenuItemApi(item: MenuItem): Promise<boolean> {
     localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(updatedMenu));
   } catch {}
 
+  // 2. Primary: Cloud Firestore
+  try {
+    const sanitized = sanitizeForFirestore(item);
+    await setDoc(doc(db, 'menuItems', item.id), sanitized);
+  } catch (fsErr) {
+    console.warn('Firestore save menu error:', fsErr);
+  }
+
+  // 3. Supabase
   if (supabase && isSupabaseConfigured) {
     try {
       const payload = mapAppMenuItemToSupabase(item);
-      const { error } = await supabase.from('menu_items').upsert(payload, { onConflict: 'id' });
-      if (error) {
-        console.warn('Supabase upsert menu_items error:', error.message);
-        // Retry with plain object in case columns are camelCase
-        await supabase.from('menu_items').upsert(item as any, { onConflict: 'id' });
-      }
-      return true;
+      await supabase.from('menu_items').upsert(payload, { onConflict: 'id' });
     } catch (e) {
       console.warn('Supabase saveMenuItem error:', e);
     }
   }
 
-  // Also notify Express API if available
+  // 4. Express backend
   try {
     await fetch(`/api/menu/${item.id}`, {
       method: 'PUT',
@@ -220,27 +312,29 @@ export async function saveMenuItemApi(item: MenuItem): Promise<boolean> {
   return true;
 }
 
-// 3. Delete Menu Item from Supabase
 export async function deleteMenuItemApi(itemId: string): Promise<boolean> {
-  // Update local cache
+  // 1. Local cache
   try {
     const local = await fetchMenuApi();
     const updated = local.filter((i) => i.id !== itemId);
     localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(updated));
   } catch {}
 
-  if (supabase && isSupabaseConfigured) {
-    try {
-      const { error } = await supabase.from('menu_items').delete().eq('id', itemId);
-      if (error) {
-        console.warn('Supabase delete menu_item error:', error.message);
-      }
-      return true;
-    } catch (e) {
-      console.warn('Supabase deleteMenuItem error:', e);
-    }
+  // 2. Primary: Cloud Firestore
+  try {
+    await deleteDoc(doc(db, 'menuItems', itemId));
+  } catch (fsErr) {
+    console.warn('Firestore delete menu error:', fsErr);
   }
 
+  // 3. Supabase
+  if (supabase && isSupabaseConfigured) {
+    try {
+      await supabase.from('menu_items').delete().eq('id', itemId);
+    } catch (e) {}
+  }
+
+  // 4. Express
   try {
     await fetch(`/api/menu/${itemId}`, { method: 'DELETE' });
   } catch {}
@@ -248,8 +342,29 @@ export async function deleteMenuItemApi(itemId: string): Promise<boolean> {
   return true;
 }
 
-// 4. Get Orders (Supabase -> Express -> Local Storage)
+// =========================================================================
+// Order Operations (Firestore -> Supabase -> Express -> Local)
+// =========================================================================
+
 export async function fetchOrdersApi(): Promise<Order[]> {
+  // 1. Primary: Cloud Firestore
+  try {
+    const ordersCol = collection(db, 'orders');
+    const q = query(ordersCol, orderBy('createdAt', 'desc'));
+    const snapshot = await getDocs(q);
+    if (!snapshot.empty) {
+      const orders: Order[] = [];
+      snapshot.forEach((docSnap) => {
+        orders.push({ ...(docSnap.data() as Order), id: docSnap.id });
+      });
+      saveLocalOrders(orders);
+      return orders;
+    }
+  } catch (fsErr) {
+    console.warn('Firestore fetch orders notice:', fsErr);
+  }
+
+  // 2. Supabase
   if (supabase && isSupabaseConfigured) {
     try {
       const { data, error } = await supabase
@@ -257,31 +372,22 @@ export async function fetchOrdersApi(): Promise<Order[]> {
         .select('*')
         .order('created_at', { ascending: false });
 
-      if (!error && data) {
+      if (!error && data && data.length > 0) {
         const list = data.map(mapSupabaseOrderToAppOrder);
         saveLocalOrders(list);
         return list;
-      } else if (error) {
-        // In case table was created with camelCase 'createdAt'
-        const retry = await supabase.from('orders').select('*');
-        if (!retry.error && retry.data) {
-          const list = retry.data.map(mapSupabaseOrderToAppOrder);
-          list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          saveLocalOrders(list);
-          return list;
-        }
       }
     } catch (sbErr) {
-      console.warn('Supabase fetch orders error:', sbErr);
+      console.warn('Supabase fetch orders notice:', sbErr);
     }
   }
 
-  // Fallback: Check Express backend API
+  // 3. Fallback: Express backend API
   try {
     const res = await fetch('/api/orders');
     if (res.ok) {
       const serverOrders: Order[] = await res.json();
-      if (Array.isArray(serverOrders)) {
+      if (Array.isArray(serverOrders) && serverOrders.length > 0) {
         saveLocalOrders(serverOrders);
         return serverOrders;
       }
@@ -291,7 +397,6 @@ export async function fetchOrdersApi(): Promise<Order[]> {
   return getLocalOrders();
 }
 
-// 5. Submit Order (Supabase Insert + Local Storage)
 export async function createOrderApi(payload: {
   customerName: string;
   customerPhone?: string;
@@ -310,7 +415,7 @@ export async function createOrderApi(payload: {
   try {
     const local = getLocalOrders();
 
-    // Calculate maximum order number
+    // Calculate maximum sequential order number
     let maxOrderNum = 1000;
     for (const ord of local) {
       if (typeof ord.orderNumber === 'number' && ord.orderNumber > maxOrderNum) {
@@ -341,7 +446,7 @@ export async function createOrderApi(payload: {
       customerName: payload.customerName || 'مشتری گرامی',
       customerPhone: payload.customerPhone || '',
       orderType: payload.orderType,
-      tableNumber: payload.orderType === 'dine-in' ? payload.tableNumber || 1 : undefined,
+      tableNumber: payload.orderType === 'dine-in' ? Number(payload.tableNumber) || 1 : undefined,
       items: cleanedItems,
       totalPrice,
       status: 'pending',
@@ -350,32 +455,39 @@ export async function createOrderApi(payload: {
       notes: payload.notes || '',
     };
 
-    // 1. Insert into Supabase Orders Table
+    // 1. Primary: Save to Cloud Firestore
+    // This allows customer phone to instantly transmit order to manager laptop on Cloudflare Pages
+    try {
+      const sanitized = sanitizeForFirestore(finalOrder);
+      await setDoc(doc(db, 'orders', finalOrder.id), sanitized);
+      console.log('✅ Order successfully saved to Cloud Firestore:', finalOrder.id);
+    } catch (fsErr) {
+      console.warn('Firestore setDoc notice:', fsErr);
+    }
+
+    // 2. Also save to Supabase if configured
     if (supabase && isSupabaseConfigured) {
       try {
         const sbRecord = mapAppOrderToSupabase(finalOrder);
-        const { error } = await supabase.from('orders').insert([sbRecord]);
-        if (error) {
-          console.warn('Supabase insert orders notice (retrying raw):', error.message);
-          await supabase.from('orders').insert([finalOrder as any]);
-        }
+        await supabase.from('orders').upsert([sbRecord], { onConflict: 'id' });
         console.log('✅ Order successfully stored in Supabase:', finalOrder.id);
       } catch (sbErr) {
-        console.error('Error inserting into Supabase orders:', sbErr);
+        console.warn('Error inserting into Supabase orders:', sbErr);
       }
     }
 
-    // 2. Also notify Express backend if running in fullstack mode
+    // 3. Also notify Express backend if running in fullstack mode (with exact same order ID)
     try {
       await fetch('/api/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(finalOrder),
       });
     } catch {}
 
-    // 3. Save to local storage for instant optimistic availability
+    // 4. Save to local storage for instant availability
     saveLocalOrders([finalOrder, ...local.filter((o) => o.id !== finalOrder.id)]);
+    saveLocalMyOrder(finalOrder);
 
     return { success: true, order: finalOrder };
   } catch (err: any) {
@@ -384,34 +496,37 @@ export async function createOrderApi(payload: {
   }
 }
 
-// 6. Update Order Status (Supabase Update + Local Storage)
 export async function updateOrderStatusApi(
   orderId: string,
   newStatus: OrderStatus
 ): Promise<boolean> {
   const now = new Date().toISOString();
 
-  // 1. Update in Supabase
+  // 1. Primary: Update in Cloud Firestore
+  // Real-time onSnapshot immediately broadcasts status to customer's phone!
+  try {
+    await updateDoc(doc(db, 'orders', orderId), {
+      status: newStatus,
+      updatedAt: now,
+    });
+    console.log('✅ Order status updated in Firestore:', orderId, newStatus);
+  } catch (fsErr) {
+    console.warn('Firestore updateDoc status notice:', fsErr);
+  }
+
+  // 2. Update in Supabase
   if (supabase && isSupabaseConfigured) {
     try {
-      const { error } = await supabase
+      await supabase
         .from('orders')
         .update({ status: newStatus, updated_at: now })
         .eq('id', orderId);
-
-      if (error) {
-        // In case column is camelCase
-        await supabase
-          .from('orders')
-          .update({ status: newStatus, updatedAt: now } as any)
-          .eq('id', orderId);
-      }
     } catch (e) {
       console.warn('Error updating status in Supabase:', e);
     }
   }
 
-  // 2. Also notify Express backend if present
+  // 3. Notify Express backend if present
   try {
     await fetch(`/api/orders/${orderId}/status`, {
       method: 'PUT',
@@ -420,33 +535,116 @@ export async function updateOrderStatusApi(
     });
   } catch {}
 
-  // 3. Local Storage update
+  // 4. Update local storage
   const local = getLocalOrders();
   const updated = local.map((o) =>
     o.id === orderId ? { ...o, status: newStatus, updatedAt: now } : o
   );
   saveLocalOrders(updated);
+  updateLocalMyOrderStatus(orderId, newStatus);
 
   return true;
 }
 
-// 7. Clear all orders (Admin only)
 export async function clearAllOrdersApi(): Promise<boolean> {
-  if (supabase && isSupabaseConfigured) {
-    try {
-      const { error } = await supabase.from('orders').delete().neq('id', '');
-      if (error) {
-        console.warn('Error clearing Supabase orders:', error.message);
-      }
-    } catch (e) {
-      console.warn('Error clearing Supabase orders:', e);
+  // 1. Primary: Clear Cloud Firestore orders
+  try {
+    const ordersCol = collection(db, 'orders');
+    const snapshot = await getDocs(ordersCol);
+    if (!snapshot.empty) {
+      const batch = writeBatch(db);
+      snapshot.forEach((docSnap) => {
+        batch.delete(docSnap.ref);
+      });
+      await batch.commit();
+      console.log('✅ Firestore orders collection cleared');
     }
+  } catch (fsErr) {
+    console.warn('Firestore clear orders error:', fsErr);
   }
 
+  // 2. Clear Supabase
+  if (supabase && isSupabaseConfigured) {
+    try {
+      await supabase.from('orders').delete().neq('id', '');
+    } catch (e) {}
+  }
+
+  // 3. Clear Express
   try {
     await fetch('/api/orders/all', { method: 'DELETE' });
   } catch {}
 
   saveLocalOrders([]);
+  try {
+    localStorage.removeItem(LOCAL_STORAGE_ORDERS_KEY);
+    localStorage.removeItem(LOCAL_STORAGE_MY_ORDERS_KEY);
+  } catch {}
+
   return true;
+}
+
+// Lookup order by ID, OrderNumber, or Phone
+export async function lookupOrderApi(queryStr: string): Promise<Order | null> {
+  const raw = queryStr.trim();
+  if (!raw) return null;
+  const clean = raw.toLowerCase().replace(/^(pc-|#pc-)/i, '').trim();
+
+  // 1. Check local memory
+  const local = getLocalOrders();
+  const foundLocal = local.find(
+    (o) =>
+      o.id.toLowerCase() === raw.toLowerCase() ||
+      String(o.orderNumber) === clean ||
+      String(o.orderNumber) === raw ||
+      (o.customerPhone && o.customerPhone.includes(raw))
+  );
+  if (foundLocal) return foundLocal;
+
+  // 2. Check Cloud Firestore
+  try {
+    const ordersCol = collection(db, 'orders');
+
+    // Direct doc ID
+    try {
+      const docSnap = await getDoc(doc(db, 'orders', raw));
+      if (docSnap.exists()) {
+        return { ...(docSnap.data() as Order), id: docSnap.id };
+      }
+    } catch {}
+
+    // By order number
+    const numQuery = Number(clean);
+    if (!isNaN(numQuery) && numQuery > 0) {
+      const qNum = query(ordersCol, where('orderNumber', '==', numQuery));
+      const snapNum = await getDocs(qNum);
+      if (!snapNum.empty) {
+        const d = snapNum.docs[0];
+        return { ...(d.data() as Order), id: d.id };
+      }
+    }
+
+    // By phone
+    if (raw.length >= 4) {
+      const qPhone = query(ordersCol, where('customerPhone', '==', raw));
+      const snapPhone = await getDocs(qPhone);
+      if (!snapPhone.empty) {
+        const d = snapPhone.docs[0];
+        return { ...(d.data() as Order), id: d.id };
+      }
+    }
+  } catch (fsErr) {
+    console.warn('Firestore lookup error:', fsErr);
+  }
+
+  // 3. Fallback to Express backend
+  try {
+    const res = await fetch(`/api/orders/lookup/${encodeURIComponent(raw)}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.order) return data.order;
+    }
+  } catch {}
+
+  return null;
 }
