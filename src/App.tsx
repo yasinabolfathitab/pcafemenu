@@ -30,11 +30,23 @@ import {
   saveMenuItemApi,
   deleteMenuItemApi,
   lookupOrderApi,
+  resetDefaultMenuApi,
 } from './services/apiService';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'menu' | 'track' | 'admin'>('menu');
-  const [menuItems, setMenuItems] = useState<MenuItem[]>(INITIAL_MENU_ITEMS);
+  const [menuItems, setMenuItems] = useState<MenuItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('pcafe_custom_menu');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length >= INITIAL_MENU_ITEMS.length) {
+          return parsed;
+        }
+      }
+    } catch {}
+    return INITIAL_MENU_ITEMS;
+  });
   
   // All Orders across the cafe (used by Admin Panel) - initialized from local cache for instant zero-lag render
   const [allOrders, setAllOrders] = useState<Order[]>(() => {
@@ -529,6 +541,20 @@ export default function App() {
     }
   };
 
+  const handleResetDefaultMenu = async () => {
+    setIsLoading(true);
+    try {
+      const fullMenu = await resetDefaultMenuApi();
+      setMenuItems(fullMenu);
+      showToast('منوی کامل با موفقیت همگام‌سازی و بازیابی گردید.');
+    } catch (e) {
+      console.error('Reset menu error:', e);
+      showToast('خطا در بازیابی منو');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleClearAllOrders = async (): Promise<boolean> => {
     try {
       fetch('/api/orders/all', { method: 'DELETE' }).catch(() => {});
@@ -628,6 +654,7 @@ export default function App() {
                 onUpdateItem={handleUpdateItem}
                 onDeleteItem={handleDeleteItem}
                 onClearAllOrders={handleClearAllOrders}
+                onResetDefaultMenu={handleResetDefaultMenu}
                 onLogout={() => {
                   setIsAdminLoggedIn(false);
                   setActiveTab('menu');

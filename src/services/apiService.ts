@@ -215,16 +215,53 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
   try {
     const menuCol = collection(db, 'menuItems');
     const snapshot = await getDocs(menuCol);
+
+    // Map all items from Firestore
+    const firestoreItems = new Map<string, MenuItem>();
     if (!snapshot.empty) {
-      const items: MenuItem[] = [];
       snapshot.forEach((docSnap) => {
-        items.push({ ...(docSnap.data() as MenuItem), id: docSnap.id });
+        const data = docSnap.data() as MenuItem;
+        firestoreItems.set(docSnap.id, { ...data, id: docSnap.id });
       });
-      if (items.length > 0) {
-        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(items));
-        return items;
+    }
+
+    // Always ensure the full comprehensive menu exists by starting with INITIAL_MENU_ITEMS
+    const fullMenuMap = new Map<string, MenuItem>();
+    for (const it of INITIAL_MENU_ITEMS) {
+      fullMenuMap.set(it.id, it);
+    }
+
+    // Apply any customized or newly created items from Firestore
+    for (const [id, it] of firestoreItems.entries()) {
+      fullMenuMap.set(id, it);
+    }
+
+    const mergedList = Array.from(fullMenuMap.values());
+
+    // If Firestore has fewer items than INITIAL_MENU_ITEMS (e.g. only 1 item was saved),
+    // seed the remaining items to Firestore so all devices have them permanently!
+    if (snapshot.empty || snapshot.docs.length < INITIAL_MENU_ITEMS.length) {
+      try {
+        const batch = writeBatch(db);
+        let count = 0;
+        for (const it of INITIAL_MENU_ITEMS) {
+          if (!firestoreItems.has(it.id)) {
+            batch.set(doc(db, 'menuItems', it.id), sanitizeForFirestore(it));
+            count++;
+          }
+        }
+        if (count > 0) {
+          batch.commit().then(() => {
+            console.log(`✅ Seeded ${count} menu items to Firestore`);
+          }).catch(() => {});
+        }
+      } catch (seedErr) {
+        console.warn('Batch seeding notice:', seedErr);
       }
     }
+
+    localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(mergedList));
+    return mergedList;
   } catch (fsErr) {
     console.warn('Firestore fetch menu notice:', fsErr);
   }
@@ -235,8 +272,13 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
       const { data, error } = await supabase.from('menu_items').select('*');
       if (!error && data && data.length > 0) {
         const items = data.map(mapSupabaseMenuItemToApp);
-        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(items));
-        return items;
+        // Also ensure all categories exist
+        const fullMap = new Map<string, MenuItem>();
+        for (const it of INITIAL_MENU_ITEMS) fullMap.set(it.id, it);
+        for (const it of items) fullMap.set(it.id, it);
+        const combined = Array.from(fullMap.values());
+        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(combined));
+        return combined;
       }
     } catch (e) {
       console.warn('Supabase menu fetch exception:', e);
@@ -249,18 +291,22 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
     if (res.ok) {
       const menu = await res.json();
       if (Array.isArray(menu) && menu.length > 0) {
-        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(menu));
-        return menu;
+        const fullMap = new Map<string, MenuItem>();
+        for (const it of INITIAL_MENU_ITEMS) fullMap.set(it.id, it);
+        for (const it of menu) fullMap.set(it.id, it);
+        const combined = Array.from(fullMap.values());
+        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(combined));
+        return combined;
       }
     }
   } catch {}
 
-  // 4. Fallback to local storage
+  // 4. Fallback to local storage or INITIAL_MENU_ITEMS
   try {
     const local = localStorage.getItem(LOCAL_STORAGE_MENU_KEY);
     if (local) {
       const parsed = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length >= INITIAL_MENU_ITEMS.length) return parsed;
     }
   } catch {}
 
@@ -340,6 +386,22 @@ export async function deleteMenuItemApi(itemId: string): Promise<boolean> {
   } catch {}
 
   return true;
+}
+
+export async function resetDefaultMenuApi(): Promise<MenuItem[]> {
+  try {
+    const batch = writeBatch(db);
+    for (const it of INITIAL_MENU_ITEMS) {
+      batch.set(doc(db, 'menuItems', it.id), sanitizeForFirestore(it));
+    }
+    await batch.commit();
+    console.log('✅ Default menu successfully reset in Firestore');
+  } catch (e) {
+    console.warn('Reset default menu notice:', e);
+  }
+
+  localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(INITIAL_MENU_ITEMS));
+  return INITIAL_MENU_ITEMS;
 }
 
 // =========================================================================

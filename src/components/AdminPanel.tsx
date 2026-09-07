@@ -24,6 +24,7 @@ import {
   LogOut,
   Volume2,
   VolumeX,
+  RotateCcw,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -67,6 +68,7 @@ interface AdminPanelProps {
   onUpdateItem: (itemId: string, item: Partial<MenuItem>) => Promise<void>;
   onDeleteItem: (itemId: string) => Promise<void>;
   onClearAllOrders?: () => Promise<boolean>;
+  onResetDefaultMenu?: () => Promise<void>;
   onLogout: () => void;
 }
 
@@ -84,6 +86,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onUpdateItem,
   onDeleteItem,
   onClearAllOrders,
+  onResetDefaultMenu,
   onLogout,
 }) => {
   const [activeTab, setActiveTab] = useState<AdminTab>('live-orders');
@@ -947,7 +950,20 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 self-end sm:self-auto">
+            <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+              {onResetDefaultMenu && (
+                <button
+                  onClick={async () => {
+                    if (window.confirm('آیا مایلید تمام آیتم‌های منوی کافه (اسپرسو، بار گرم، سرد، کیک‌ها، ماکتل و ...) بازیابی و با پایگاه داده همگام‌سازی شوند؟')) {
+                      await onResetDefaultMenu();
+                    }
+                  }}
+                  className="px-4 py-2.5 rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-300 font-bold text-xs flex items-center gap-2 border border-stone-700 transition-colors"
+                >
+                  <RotateCcw className="w-4 h-4 text-amber-400" />
+                  <span>بازیابی و همگام‌سازی منوی کامل کافه</span>
+                </button>
+              )}
               <button
                 onClick={openCreateItem}
                 className="px-4 py-2.5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-bold text-xs flex items-center gap-2 shadow-lg shadow-amber-500/20"
