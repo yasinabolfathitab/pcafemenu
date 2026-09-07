@@ -74,7 +74,6 @@ export interface Order {
   createdAt: string; // ISO string
   updatedAt: string;
   notes?: string;
-  telegramNotified?: boolean;
 }
 
 export interface CafeStats {

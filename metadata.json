@@ -1,6 +1,6 @@
 {
   "name": "P Cafe - منو و سفارش آنلاین",
-  "description": "سامانه سفارش آنلاین، منوی دیجیتال و پنل مدیریت هوشمند کافه پی (P Cafe) با اتصال به تلگرام و تحلیل داده‌های مالی و سفارشات",
+  "description": "سامانه سفارش آنلاین، منوی دیجیتال و پنل مدیریت هوشمند کافه پی (P Cafe) با پایگاه داده Supabase و تحلیل داده‌های مالی و سفارشات",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

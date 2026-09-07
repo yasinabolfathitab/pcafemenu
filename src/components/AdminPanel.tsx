@@ -15,7 +15,7 @@ import {
   Plus,
   Edit2,
   Trash2,
-  Send,
+  Database,
   Sparkles,
   BarChart3,
   Calendar,
@@ -43,6 +43,12 @@ import {
 import { Order, MenuItem, OrderStatus, CategoryId } from '../types';
 import { CATEGORIES } from '../data/initialMenu';
 import {
+  supabase,
+  isSupabaseConfigured,
+  SUPABASE_URL,
+} from '../supabase';
+import { playNewOrderChime } from '../utils/audio';
+import {
   formatPriceToman,
   formatRelativeTime,
   formatPersianTimeOnly,
@@ -64,7 +70,7 @@ interface AdminPanelProps {
   onLogout: () => void;
 }
 
-type AdminTab = 'live-orders' | 'analytics' | 'menu-management' | 'telegram-settings';
+type AdminTab = 'live-orders' | 'analytics' | 'menu-management' | 'database-settings';
 type TimeFilter = 'today' | 'weekly' | 'monthly' | 'yearly';
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({
@@ -86,6 +92,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [menuSearch, setMenuSearch] = useState<string>('');
   const [selectedCategory, setSelectedCategory] = useState<CategoryId | 'all'>('all');
   const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(true);
+  const [isWebSocketActive, setIsWebSocketActive] = useState<boolean>(false);
+
+  // Step 3 (Real-time): Supabase WebSockets live subscription for Cafe Admin Panel
+  useEffect(() => {
+    if (!supabase || !isSupabaseConfigured) {
+      setIsWebSocketActive(false);
+      return;
+    }
+
+    console.log('🔌 Connecting Admin Panel to Supabase WebSocket channel (public:orders)...');
+    const channel = supabase
+      .channel('admin-panel-orders-websocket')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders',
+        },
+        (payload) => {
+          console.log('⚡ [AdminPanel WebSockets] Real-time event received:', payload.eventType);
+          // Instant sync without page reload
+          onRefreshOrders();
+
+          if (payload.eventType === 'INSERT') {
+            if (isSoundEnabled) {
+              playNewOrderChime();
+            }
+          }
+        }
+      )
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          setIsWebSocketActive(true);
+          console.log('🟢 Admin Panel Supabase WebSockets active and listening');
+        } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR') {
+          setIsWebSocketActive(false);
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [isSoundEnabled, onRefreshOrders]);
 
   // Clear orders confirmation modal state
   const [isClearOrdersModalOpen, setIsClearOrdersModalOpen] = useState<boolean>(false);
@@ -95,9 +145,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [statsData, setStatsData] = useState<any>(null);
   const [isLoadingStats, setIsLoadingStats] = useState<boolean>(false);
 
-  // Telegram test response feedback
-  const [telegramStatus, setTelegramStatus] = useState<string | null>(null);
-  const [isTestingTg, setIsTestingTg] = useState<boolean>(false);
+  // Database action response feedback
+  const [dbActionStatus, setDbActionStatus] = useState<string | null>(null);
 
   // Add / Edit Item Modal
   const [isItemModalOpen, setIsItemModalOpen] = useState<boolean>(false);
@@ -137,61 +186,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     return () => clearInterval(interval);
   }, [orders]);
 
-  const testTelegram = async () => {
-    setIsTestingTg(true);
-    setTelegramStatus(null);
-    try {
-      const res = await fetch('/api/telegram/test', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        setTelegramStatus('✅ پیام تست با موفقیت به کانال @pcafedata ارسال شد!');
-      } else {
-        setTelegramStatus(`❌ خطا در ارسال به تلگرام: ${data.error || 'ناشناخته'}`);
-      }
-    } catch (e: any) {
-      setTelegramStatus(`❌ خطا: ${e.message}`);
-    } finally {
-      setIsTestingTg(false);
-    }
-  };
-
-  const backupToTelegram = async () => {
-    setIsTestingTg(true);
-    setTelegramStatus(null);
-    try {
-      const res = await fetch('/api/telegram/backup', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        setTelegramStatus('📦 بکاپ کامل داده‌های کافه به کانال @pcafedata مخابره گردید.');
-      } else {
-        setTelegramStatus(`❌ خطا در ارسال بکاپ: ${data.error}`);
-      }
-    } catch (e: any) {
-      setTelegramStatus(`❌ خطا: ${e.message}`);
-    } finally {
-      setIsTestingTg(false);
-    }
-  };
-
-  const restoreFromTelegram = async () => {
-    setIsTestingTg(true);
-    setTelegramStatus(null);
-    try {
-      const res = await fetch('/api/telegram/sync', { method: 'POST' });
-      const data = await res.json();
-      if (data.success) {
-        onRefreshOrders();
-        setTelegramStatus(`🔄 همگام‌سازی انجام شد: ${data.restored} سفارش از پیام‌های کانال بازیابی شد (مجموع: ${data.totalOrders} سفارش).`);
-      } else {
-        setTelegramStatus(`❌ خطا در بازیابی: ${data.error || 'دسترسی مقدور نشد'}`);
-      }
-    } catch (e: any) {
-      setTelegramStatus(`❌ خطا: ${e.message}`);
-    } finally {
-      setIsTestingTg(false);
-    }
-  };
-
   const handleOpenClearModal = () => {
     setIsClearOrdersModalOpen(true);
   };
@@ -207,11 +201,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           onRefreshOrders();
         }
       }
-      setTelegramStatus('🗑️ تمامی سفارش‌ها با موفقیت از دیتابیس پاکسازی شدند.');
+      setDbActionStatus('🗑️ تمامی سفارش‌ها با موفقیت از دیتابیس پاکسازی شدند.');
       fetchStats();
       setIsClearOrdersModalOpen(false);
     } catch (e: any) {
-      setTelegramStatus(`❌ خطا در پاکسازی سفارش‌ها: ${e.message}`);
+      setDbActionStatus(`❌ خطا در پاکسازی سفارش‌ها: ${e.message}`);
     } finally {
       setIsClearingOrders(false);
     }
@@ -308,10 +302,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             <span className="px-3 py-1 rounded-full bg-amber-500 text-stone-950 font-black text-xs">
               پنل مدیریت P CAFE
             </span>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              <span>استریم زنده و همگام‌سازی لحظه‌ای گوشی مشتریان</span>
-            </div>
+            {isSupabaseConfigured ? (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                <span className={`w-2 h-2 rounded-full bg-emerald-400 ${isWebSocketActive ? 'animate-ping' : ''}`} />
+                <span>اتصال وب‌سوکت Supabase (Real-time)</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold">
+                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+                <span>حالت محلی Standalone / آماده اتصال به Supabase</span>
+              </div>
+            )}
           </div>
           <h2 className="text-2xl sm:text-3xl font-black text-white">
             داشبورد مانیتورینگ سفارش‌ها و گزارش مالی
@@ -398,15 +399,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </button>
 
         <button
-          onClick={() => setActiveTab('telegram-settings')}
+          onClick={() => setActiveTab('database-settings')}
           className={`px-5 py-3 rounded-2xl font-bold text-xs sm:text-sm flex items-center gap-2 transition-all whitespace-nowrap ${
-            activeTab === 'telegram-settings'
+            activeTab === 'database-settings'
               ? 'bg-amber-500 text-stone-950 shadow-lg shadow-amber-500/25'
               : 'bg-stone-900 text-stone-300 hover:bg-stone-800 border border-stone-800'
           }`}
         >
-          <Send className="w-4 h-4" />
-          <span>اتصال تلگرام و دیتابیس</span>
+          <Database className="w-4 h-4" />
+          <span>پایگاه داده و اتصالات</span>
         </button>
       </div>
 
@@ -1061,99 +1062,120 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
         </div>
       )}
 
-      {/* TAB 4: TELEGRAM & DATABASE SETTINGS */}
-      {activeTab === 'telegram-settings' && (
+      {/* TAB 4: SUPABASE DATABASE SETTINGS */}
+      {activeTab === 'database-settings' && (
         <div className="space-y-6 max-w-3xl">
-          <div className="bg-stone-900 border border-stone-800 rounded-3xl p-6 shadow-xl space-y-6">
+          {/* Supabase Database & Realtime WebSocket Status Card */}
+          <div className="bg-stone-900 border border-amber-500/30 rounded-3xl p-6 shadow-xl space-y-6 backdrop-blur-md">
             <div className="flex items-center gap-3">
-              <div className="p-3 rounded-2xl bg-sky-500/20 text-sky-400 border border-sky-500/30">
-                <Send className="w-6 h-6" />
+              <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <RefreshCw className={`w-6 h-6 ${isWebSocketActive ? 'animate-spin' : ''}`} style={{ animationDuration: '6s' }} />
               </div>
               <div>
-                <h3 className="text-xl font-black text-white">
-                  وضعیت اتصال به ربات و کانال تلگرام
-                </h3>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xl font-black text-white">
+                    پایگاه داده Supabase و وب‌سوکت آنی
+                  </h3>
+                  {isSupabaseConfigured ? (
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 text-[11px] font-bold border border-emerald-500/30">
+                      متصل (Connected)
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-400 text-[11px] font-bold border border-amber-500/30">
+                      حالت Standalone / لوکال
+                    </span>
+                  )}
+                </div>
                 <p className="text-xs text-stone-400">
-                  تمام سفارش‌ها، تغییرات وضعیت و پشتیبان‌گیری دیتابیس به صورت خودکار به کانال تلگرام مخابره می‌شود.
+                  مدیریت ذخیره‌سازی داده‌های سفارش و دریافت لحظه‌ای رویدادها از جدول orders با وب‌سوکت سوپابیس
                 </p>
               </div>
             </div>
 
-            <div className="space-y-4 pt-4 border-t border-stone-800">
-              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 space-y-2">
-                <div className="text-xs text-stone-400">آیدی کانال دیتابیس تلگرام:</div>
-                <div className="font-mono text-base font-bold text-amber-400 dir-ltr flex items-center justify-between">
-                  <span>@pcafedata</span>
-                  <a
-                    href="https://t.me/pcafedata"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-sky-400 hover:underline font-vazir"
-                  >
-                    مشاهده کانال در تلگرام
-                  </a>
-                </div>
+            <div className="space-y-3 pt-4 border-t border-stone-800 text-xs">
+              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between">
+                <span className="text-stone-400">وضعیت اتصال WebSockets:</span>
+                <span className="font-bold flex items-center gap-2">
+                  <span className={`w-2.5 h-2.5 rounded-full ${isWebSocketActive ? 'bg-emerald-400 animate-ping' : 'bg-stone-500'}`} />
+                  <span className={isWebSocketActive ? 'text-emerald-400' : 'text-stone-400'}>
+                    {isWebSocketActive ? 'کانال Realtime فعال و شنونده تغییرات' : 'در انتظار اتصال / حالت آفلاین'}
+                  </span>
+                </span>
               </div>
 
-              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 space-y-2">
-                <div className="text-xs text-stone-400">توکن فعال ربات ادمین (Bot Token):</div>
-                <div className="font-mono text-xs text-stone-300 dir-ltr break-all bg-stone-900 p-2.5 rounded-xl">
-                  8632037639:AAFZm5TzaEj5Dy5o1EK2Ve0Z5UXjEsRtHx8
-                </div>
+              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between">
+                <span className="text-stone-400">آدرس پروژه (Project URL):</span>
+                <span className="font-mono text-stone-200 dir-ltr font-bold">
+                  {SUPABASE_URL ? `${SUPABASE_URL.slice(0, 25)}...` : 'تنظیم نشده (پیش‌فرض لوکال)'}
+                </span>
               </div>
 
-              {telegramStatus && (
-                <motion.div
-                  initial={{ opacity: 0, y: 5 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-4 rounded-2xl bg-stone-950 border border-amber-500/40 text-xs text-stone-200"
-                >
-                  {telegramStatus}
-                </motion.div>
-              )}
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-                <button
-                  onClick={testTelegram}
-                  disabled={isTestingTg}
-                  className="py-3 px-4 rounded-2xl bg-sky-500 hover:bg-sky-400 text-stone-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-sky-500/20 transition-all disabled:opacity-50"
-                >
-                  <Send className="w-4 h-4" />
-                  <span>تست اتصال کانال</span>
-                </button>
-
-                <button
-                  onClick={backupToTelegram}
-                  disabled={isTestingTg}
-                  className="py-3 px-4 rounded-2xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all disabled:opacity-50"
-                >
-                  <Sparkles className="w-4 h-4" />
-                  <span>بکاپ دیتابیس در تلگرام</span>
-                </button>
-
-                <button
-                  onClick={restoreFromTelegram}
-                  disabled={isTestingTg}
-                  className="py-3 px-4 rounded-2xl bg-emerald-500 hover:bg-emerald-400 text-stone-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 transition-all disabled:opacity-50"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                  <span>بازیابی از تلگرام</span>
-                </button>
+              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between">
+                <span className="text-stone-400">جداول مرتبط دیتابیس:</span>
+                <span className="font-mono text-amber-400 font-bold dir-ltr">
+                  orders, menu_items
+                </span>
               </div>
 
-              {/* Clear Orders Database Card */}
-              <div className="pt-4 mt-4 border-t border-stone-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div>
-                  <h4 className="text-xs font-bold text-stone-200">پاکسازی تاریخچه سفارش‌های ثبت شده</h4>
-                  <p className="text-[11px] text-stone-400">حذف تمامی سفارش‌های تستی و جاری از لیست پیگیری و پنل مدیریت</p>
-                </div>
-                <button
-                  onClick={handleOpenClearModal}
-                  className="px-4 py-2.5 rounded-xl bg-rose-500/20 hover:bg-rose-500 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-bold transition-all whitespace-nowrap"
-                >
-                  حذف و پاکسازی تمام سفارش‌ها
-                </button>
+              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between">
+                <span className="text-stone-400">تعداد سفارشات در حافظه جاری:</span>
+                <span className="text-stone-200 font-bold">
+                  {toPersianDigits(orders.length)} سفارش
+                </span>
               </div>
+
+              <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between">
+                <span className="text-stone-400">تعداد اقلام ثبت‌شده در منو:</span>
+                <span className="text-stone-200 font-bold">
+                  {toPersianDigits(menuItems.length)} آیتم
+                </span>
+              </div>
+            </div>
+
+            {dbActionStatus && (
+              <motion.div
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="p-4 rounded-2xl bg-stone-950 border border-amber-500/40 text-xs text-stone-200"
+              >
+                {dbActionStatus}
+              </motion.div>
+            )}
+
+            <div className="pt-4 border-t border-stone-800 flex flex-wrap gap-3">
+              <button
+                onClick={() => {
+                  onRefreshOrders();
+                  onRefreshMenu();
+                  fetchStats();
+                  setDbActionStatus('🔄 داده‌های سفارشات و منو مجدداً با پایگاه داده همگام‌سازی شدند.');
+                }}
+                className="py-3 px-5 rounded-2xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs flex items-center gap-2 shadow-lg shadow-amber-500/20 transition-all"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>همگام‌سازی و بازخوانی مجدد اطلاعات</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Danger Zone: Clear Orders Database Card */}
+          <div className="bg-stone-900 border border-rose-500/20 rounded-3xl p-6 shadow-xl space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-2xl bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-base font-bold text-stone-200">پاکسازی تاریخچه سفارش‌های ثبت شده</h4>
+                <p className="text-xs text-stone-400">حذف تمامی سفارش‌های تستی و جاری از لیست پیگیری و پایگاه داده</p>
+              </div>
+            </div>
+            <div className="pt-2 flex justify-end">
+              <button
+                onClick={handleOpenClearModal}
+                className="px-5 py-3 rounded-2xl bg-rose-500/20 hover:bg-rose-500 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-bold transition-all whitespace-nowrap"
+              >
+                حذف و پاکسازی تمام سفارش‌ها
+              </button>
             </div>
           </div>
         </div>

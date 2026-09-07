@@ -5,24 +5,11 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { INITIAL_MENU_ITEMS } from './src/data/initialMenu';
 import { MenuItem, Order, OrderStatus } from './src/types';
-import { db } from './src/firebase';
-import { collection, getDocs, doc, setDoc, updateDoc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { supabase, isSupabaseConfigured, mapAppOrderToSupabase, mapSupabaseOrderToAppOrder } from './src/supabase';
 
 dotenv.config();
 
 const PORT = 3000;
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '8632037639:AAFZm5TzaEj5Dy5o1EK2Ve0Z5UXjEsRtHx8';
-// Safe helper to resolve channel target (prevents bot sending to itself if env variable is set to bot username)
-function getTargetChatId(): string {
-  const envVal = (process.env.TELEGRAM_CHANNEL_ID || '').trim();
-  if (!envVal || envVal.toLowerCase().includes('bot') || envVal === '8632037639') {
-    return '-1004411658114'; // @pcafedata channel ID
-  }
-  if (envVal === '@pcafedata') {
-    return '-1004411658114';
-  }
-  return envVal;
-}
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '1234';
 
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -107,7 +94,6 @@ function generateInitialOrders(): Order[] {
       status,
       createdAt: orderDate.toISOString(),
       updatedAt: new Date(orderDate.getTime() + 15 * 60000).toISOString(),
-      telegramNotified: true,
       notes: i % 5 === 0 ? 'لطفاً نوشیدنی‌ها همزمان سرو شوند' : undefined,
     });
   }
@@ -158,20 +144,24 @@ function saveOrders(orders: Order[]) {
 let menuState: MenuItem[] = loadMenu();
 let ordersState: Order[] = loadOrders();
 
-// Sync ordersState with Firestore on startup and keep it updated
-try {
-  onSnapshot(collection(db, 'orders'), (snapshot) => {
-    const list: Order[] = [];
-    snapshot.forEach((docSnap) => {
-      list.push({ ...(docSnap.data() as Order), id: docSnap.id });
-    });
-    list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-    ordersState = list;
-    saveOrders(list);
-    broadcastSSE('orders_updated', { orders: list });
-  });
-} catch (e) {
-  console.warn('Could not connect server to Firestore, relying on local state.');
+// Sync ordersState with Supabase on startup and keep it updated
+if (supabase && isSupabaseConfigured) {
+  try {
+    supabase
+      .from('orders')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .then(({ data, error }) => {
+        if (!error && data && data.length > 0) {
+          const list = data.map(mapSupabaseOrderToAppOrder);
+          ordersState = list;
+          saveOrders(list);
+          broadcastSSE('orders_updated', { orders: list });
+        }
+      });
+  } catch (e) {
+    console.warn('Could not connect server to Supabase, relying on local state.');
+  }
 }
 
 // Deep sanitizer: Firestore throws an error if any field in an object is `undefined`
@@ -196,47 +186,6 @@ export function sanitizeForFirestore<T>(data: T): T {
   return cleanObj as T;
 }
 
-// Fetch latest updates or restore orders from Telegram channel (Database Sync)
-async function syncOrdersFromTelegram(): Promise<{ restored: number; error?: string }> {
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getUpdates?limit=100`;
-    const response = await fetch(url);
-    if (!response.ok) return { restored: 0, error: 'Cannot contact Telegram API' };
-    const data = await response.json();
-    if (!data.ok || !Array.isArray(data.result)) return { restored: 0, error: data.description };
-
-    let restoredCount = 0;
-    for (const update of data.result) {
-      const msg = update.channel_post || update.message;
-      if (msg && msg.text && msg.text.includes('PCAFE_DB_RECORD:')) {
-        const match = msg.text.match(/PCAFE_DB_RECORD:([A-Za-z0-9+/=]+)/);
-        if (match && match[1]) {
-          try {
-            const rawJson = Buffer.from(match[1], 'base64').toString('utf-8');
-            const restoredOrder: Order = JSON.parse(rawJson);
-            if (restoredOrder && restoredOrder.id) {
-              const existingIdx = ordersState.findIndex((o) => o.id === restoredOrder.id);
-              if (existingIdx === -1) {
-                ordersState.push(restoredOrder);
-                restoredCount++;
-              } else {
-                ordersState[existingIdx] = { ...ordersState[existingIdx], ...restoredOrder };
-              }
-            }
-          } catch (e) {
-            // Ignore corrupted payload
-          }
-        }
-      }
-    }
-    if (restoredCount > 0) {
-      saveOrders(ordersState);
-    }
-    return { restored: restoredCount };
-  } catch (err: any) {
-    return { restored: 0, error: err.message };
-  }
-}
 function formatPrice(num: number): string {
   return num.toLocaleString('en-US') + ' تومان';
 }
@@ -256,107 +205,6 @@ function formatPersianDate(isoString: string): string {
   } catch {
     return isoString;
   }
-}
-
-// Telegram Message Dispatcher with Payload Tagging & Auto-Document Fallback for large DB backups
-async function sendTelegramMessage(text: string, rawDataPayload?: any): Promise<{ success: boolean; result?: any; error?: string }> {
-  try {
-    let messageBody = text;
-    const targetChatId = getTargetChatId();
-
-    if (rawDataPayload) {
-      const jsonStr = JSON.stringify(rawDataPayload);
-      const b64 = Buffer.from(jsonStr).toString('base64');
-      const tagged = `\n\n<tg-spoiler>📦 [PCAFE_DB_RECORD:${b64}]</tg-spoiler>`;
-      
-      // If adding tagged payload stays under Telegram's 4000-character text limit:
-      if ((messageBody + tagged).length < 3950) {
-        messageBody += tagged;
-      } else {
-        // If payload is too large for a single text message (like full database backup), send as JSON Document
-        try {
-          const form = new FormData();
-          form.append('chat_id', targetChatId);
-          form.append('caption', text.slice(0, 1000));
-          form.append('parse_mode', 'HTML');
-          const blob = new Blob([jsonStr], { type: 'application/json' });
-          form.append('document', blob, 'pcafe_database_backup.json');
-
-          const docRes = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument`, {
-            method: 'POST',
-            body: form,
-          });
-          const docData = await docRes.json();
-          if (docRes.ok && docData.ok) {
-            return { success: true, result: docData.result };
-          }
-        } catch (fileErr) {
-          console.warn('[Telegram Document upload failed, falling back to summary]:', fileErr);
-        }
-      }
-    }
-
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        chat_id: targetChatId,
-        text: messageBody.slice(0, 4000),
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      }),
-    });
-
-    const data = await response.json();
-    if (!response.ok || !data.ok) {
-      console.warn(`[Telegram Bot] Status: ${data.error_code || response.status}, Description: ${data.description || 'Channel access notice'}`);
-      return { success: false, error: data.description || 'Telegram service notice' };
-    }
-    return { success: true, result: data.result };
-  } catch (err: any) {
-    console.warn('[Telegram Dispatch]:', err.message);
-    return { success: false, error: err.message };
-  }
-}
-
-// Helper to format Order into beautiful Persian Telegram HTML
-function formatOrderForTelegram(order: Order): string {
-  const timeStr = formatPersianDate(order.createdAt);
-  const typeStr = order.orderType === 'dine-in' ? `🪑 <b>میز شماره ${order.tableNumber}</b> (سالن)` : '🛍️ <b>بیرون‌بر (Takeaway)</b>';
-  
-  let itemsList = '';
-  order.items.forEach((item, idx) => {
-    let customText = '';
-    if (item.options) {
-      const opts = [];
-      if (item.options.milk) opts.push(`شیر: ${item.options.milk}`);
-      if (item.options.sugar) opts.push(`شکر: ${item.options.sugar}`);
-      if (item.options.extraShot) opts.push(`+ شات دوبل`);
-      if (item.options.syrup) opts.push(`سیروپ: ${item.options.syrup}`);
-      if (opts.length > 0) {
-        customText = ` <i>(${opts.join(' - ')})</i>`;
-      }
-    }
-    itemsList += `  ▫️ ${idx + 1}. <b>${item.name}</b> × ${item.quantity} عدد${customText} — ${formatPrice(item.price * item.quantity)}\n`;
-  });
-
-  return `☕️ <b>سفارش جدید P Cafe دریافت شد!</b>
-
-🆔 <b>شماره فاکتور:</b> <code>#PC-${order.orderNumber}</code>
-👤 <b>نام مشتری:</b> ${order.customerName || 'مشتری گرامی'}
-${order.customerPhone ? `📞 <b>شماره تماس:</b> <code>${order.customerPhone}</code>\n` : ''}📍 <b>نوع سفارش:</b> ${typeStr}
-🕒 <b>زمان ثبت:</b> ${timeStr}
-
-📋 <b>آیتم‌های سفارش:</b>
-${itemsList}
-💰 <b>مبلغ کل قابل پرداخت:</b> <b>${formatPrice(order.totalPrice)}</b>
-${order.notes ? `\n📝 <b>یادداشت مشتری:</b> <i>${order.notes}</i>` : ''}
-
-📌 <b>وضعیت کنونی:</b> ⏳ <i>در انتظار آماده‌سازی در باریستا</i>
-✨ <i>سیستم سفارش‌گیری آنلاین و اختصاصی کافه پی (P Cafe)</i>`;
 }
 
 // Active Server-Sent Events (SSE) client connections for real-time live sync
@@ -389,7 +237,7 @@ async function startServer() {
     res.status(200).json({
       status: 'online',
       cafe: 'P Cafe',
-      telegramChannel: getTargetChatId(),
+      supabase: isSupabaseConfigured ? 'connected' : 'standalone',
       connectedClients: sseClients.size,
       ordersCount: ordersState.length,
       menuCount: menuState.length,
@@ -521,12 +369,13 @@ async function startServer() {
 
   // Clear all orders (Admin or reset)
   app.delete('/api/orders/all', async (req, res) => {
-    try {
-      const snapshot = await getDocs(collection(db, 'orders'));
-      const batch = writeBatch(db);
-      snapshot.forEach(docSnap => batch.delete(docSnap.ref));
-      await batch.commit();
-    } catch(e) {}
+    if (supabase && isSupabaseConfigured) {
+      try {
+        await supabase.from('orders').delete().neq('id', '');
+      } catch (e) {
+        console.warn('Supabase delete all error:', e);
+      }
+    }
     
     ordersState = [];
     saveOrders([]);
@@ -563,27 +412,19 @@ async function startServer() {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         notes: notes || undefined,
-        telegramNotified: false,
       };
 
       ordersState.unshift(newOrder);
       saveOrders(ordersState);
 
-      // Async send to Telegram channel with embedded DB record for permanent persistence
-      const telegramMessage = formatOrderForTelegram(newOrder);
-      const tgResult = await sendTelegramMessage(telegramMessage, newOrder);
-
-      if (tgResult.success) {
-        newOrder.telegramNotified = true;
-        saveOrders(ordersState);
-      }
-      
-      // Save to Firestore
-      try {
-        const orderRef = doc(db, 'orders', newOrder.id);
-        await setDoc(orderRef, sanitizeForFirestore(newOrder));
-      } catch (e) {
-        console.warn('Express failed to save to Firestore:', e);
+      // Save to Supabase
+      if (supabase && isSupabaseConfigured) {
+        try {
+          const sbPayload = mapAppOrderToSupabase(newOrder);
+          await supabase.from('orders').insert([sbPayload]);
+        } catch (e) {
+          console.warn('Express failed to save to Supabase:', e);
+        }
       }
 
       // INSTANT BROADCAST TO ADMIN PANEL ON LAPTOP & CONNECTED SCREENS
@@ -593,8 +434,6 @@ async function startServer() {
       res.status(201).json({
         success: true,
         order: newOrder,
-        telegramSent: tgResult.success,
-        telegramError: tgResult.error,
       });
     } catch (err: any) {
       console.error('Error creating order:', err);
@@ -617,48 +456,20 @@ async function startServer() {
     order.updatedAt = new Date().toISOString();
     saveOrders(ordersState);
     
-    // Save to Firestore
-    try {
-      const orderRef = doc(db, 'orders', id);
-      await updateDoc(orderRef, { status: status, updatedAt: order.updatedAt });
-    } catch (e) {
-      console.warn('Express failed to update Firestore:', e);
+    // Save to Supabase
+    if (supabase && isSupabaseConfigured) {
+      try {
+        await supabase.from('orders').update({ status, updated_at: order.updatedAt }).eq('id', id);
+      } catch (e) {
+        console.warn('Express failed to update Supabase:', e);
+      }
     }
 
     // Broadcast status change immediately to all clients
     broadcastSSE('order_status_updated', { order, status, timestamp: Date.now() });
     broadcastSSE('orders_updated', { orders: ordersState });
 
-    // Send update note to Telegram channel
-    const statusLabels: Record<OrderStatus, string> = {
-      pending: '⏳ در انتظار تایید',
-      preparing: '👨‍🍳 در حال آماده‌سازی توسط باریستا',
-      ready: '🔔 آماده تحویل به مشتری',
-      completed: '✅ تحویل داده شد و تسویه شد',
-      cancelled: '❌ لغو گردید',
-    };
-
-    const updateNotice = `🔔 <b>بروزرسانی وضعیت سفارش P Cafe</b>\n\n` +
-      `🆔 فاکتور: <code>#PC-${order.orderNumber}</code>\n` +
-      `👤 مشتری: ${order.customerName}\n` +
-      `📍 موقعیت: ${order.orderType === 'dine-in' ? `میز ${order.tableNumber}` : 'بیرون‌بر'}\n` +
-      `🔄 وضعیت جدید: <b>${statusLabels[status as OrderStatus] || status}</b>\n` +
-      `🕒 زمان: ${formatPersianDate(order.updatedAt)}`;
-
-    sendTelegramMessage(updateNotice, order).catch(console.warn);
-
     res.json({ success: true, order });
-  });
-
-  // Sync / Restore orders from Telegram channel
-  app.post('/api/telegram/sync', async (req, res) => {
-    const result = await syncOrdersFromTelegram();
-    res.json({
-      success: true,
-      restored: result.restored,
-      totalOrders: ordersState.length,
-      error: result.error,
-    });
   });
 
   // Live Stats endpoint for daily, weekly, monthly, yearly analytics
@@ -770,39 +581,6 @@ async function startServer() {
       dailyBreakdown,
       monthlyBreakdown,
     });
-  });
-
-  // Telegram Test Connection
-  app.post('/api/telegram/test', async (req, res) => {
-    const testMsg = `✨ <b>تست اتصال سرور P Cafe به تلگرام</b>\n\n` +
-      `✅ ربات با موفقیت به کانال متصل است.\n` +
-      `🕒 زمان اتصال: ${formatPersianDate(new Date().toISOString())}\n` +
-      `☕️ سامانه آماده دریافت و مخابره سفارشات می‌باشد.`;
-
-    const result = await sendTelegramMessage(testMsg);
-    res.json(result);
-  });
-
-  // Telegram Full Database Backup
-  app.post('/api/telegram/backup', async (req, res) => {
-    const backupData = {
-      backupTimestamp: new Date().toISOString(),
-      ordersCount: ordersState.length,
-      orders: ordersState,
-      menuCount: menuState.length,
-      menu: menuState,
-    };
-
-    const backupMsg = `📦 <b>پشتیبان‌گیری کلی دیتابیس P Cafe</b>\n\n` +
-      `📊 <b>آمار کل:</b>\n` +
-      `• تعداد کل سفارش‌ها: ${ordersState.length} عدد\n` +
-      `• کل فروش ثبت شده: ${formatPrice(ordersState.reduce((sum, o) => sum + o.totalPrice, 0))}\n` +
-      `• تعداد آیتم‌های منو: ${menuState.length} قلم\n` +
-      `🕒 تاریخ تهیه بکاپ: ${formatPersianDate(new Date().toISOString())}\n\n` +
-      `<i>اطلاعات دیتابیس در کانال تلگرام ذخیره و پایدار شد.</i>`;
-
-    const result = await sendTelegramMessage(backupMsg, backupData);
-    res.json(result);
   });
 
   // === VITE / STATIC SERVING ===
