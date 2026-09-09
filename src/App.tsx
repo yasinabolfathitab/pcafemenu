@@ -12,6 +12,7 @@ import { CartDrawer } from './components/CartDrawer';
 import { OrderStatusTracker } from './components/OrderStatusTracker';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { AdminPanel } from './components/AdminPanel';
+import { FloatingCartButton } from './components/FloatingCartButton';
 import { MenuItem, CartItem, CartItemOption, Order, OrderStatus } from './types';
 import { INITIAL_MENU_ITEMS } from './data/initialMenu';
 import { Coffee, MapPin, Phone, Instagram, Send, Heart, Clock, ShoppingBag, ShieldCheck } from 'lucide-react';
@@ -598,7 +599,7 @@ export default function App() {
       />
 
       {/* Main View Body */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-24 md:pb-8">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-36 md:pb-12">
         <AnimatePresence mode="wait">
           {activeTab === 'menu' && (
             <motion.div
@@ -693,6 +694,14 @@ export default function App() {
         }}
       />
 
+      {/* Persistent Fixed Floating Cart Button on Page (Desktop & Mobile) */}
+      <FloatingCartButton
+        cartCount={cartCount}
+        cartTotal={cartTotal}
+        onOpenCart={() => setIsCartOpen(true)}
+        activeTab={activeTab}
+      />
+
       {/* Toast Notification Alert */}
       <AnimatePresence>
         {toastMessage && (
@@ -700,7 +709,7 @@ export default function App() {
             initial={{ opacity: 0, y: 50, scale: 0.9 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.9 }}
-            className="fixed bottom-6 right-6 left-6 sm:left-auto sm:max-w-md z-50 bg-stone-900/95 border border-amber-500/50 text-white px-5 py-3.5 rounded-2xl shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 text-xs sm:text-sm font-bold"
+            className="fixed bottom-28 md:bottom-8 right-4 left-4 sm:left-auto sm:right-8 sm:max-w-md z-50 bg-stone-900/95 border border-amber-500/50 text-white px-5 py-3.5 rounded-2xl shadow-2xl backdrop-blur-xl flex items-center justify-between gap-3 text-xs sm:text-sm font-bold"
           >
             <span>{toastMessage}</span>
             <button
@@ -716,23 +725,23 @@ export default function App() {
       {/* Luxury Persian Footer */}
       <footer className="mt-auto bg-stone-950 border-t border-stone-800/80 pt-12 pb-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-8 mb-12 text-center md:text-right">
             {/* Identity */}
-            <div className="space-y-3">
-              <div className="flex items-center gap-2">
+            <div className="space-y-3 flex flex-col items-center md:items-start">
+              <div className="flex items-center justify-center md:justify-start gap-2">
                 <div className="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center text-stone-950 font-black">
                   P
                 </div>
                 <span className="font-black text-xl text-white">P CAFE</span>
               </div>
-              <p className="text-xs text-stone-400 leading-relaxed">
+              <p className="text-xs text-stone-400 leading-relaxed max-w-sm">
                 کافه تخصصی و رستر P Cafe — ارائه‌دهنده قهوه‌های تک‌خاستگاه اسپشالتی، بار سرد دست‌ساز و شیرینی‌های تازه فرانسوی.
               </p>
             </div>
 
             {/* Working Hours */}
-            <div className="space-y-2">
-              <h4 className="font-bold text-xs text-amber-400 flex items-center gap-1.5">
+            <div className="space-y-2 flex flex-col items-center md:items-start">
+              <h4 className="font-bold text-xs text-amber-400 flex items-center justify-center md:justify-start gap-1.5">
                 <Clock className="w-4 h-4" />
                 ساعات کاری کافه:
               </h4>
@@ -745,8 +754,8 @@ export default function App() {
             </div>
 
             {/* Location & Contact */}
-            <div className="space-y-2">
-              <h4 className="font-bold text-xs text-amber-400 flex items-center gap-1.5">
+            <div className="space-y-2 flex flex-col items-center md:items-start">
+              <h4 className="font-bold text-xs text-amber-400 flex items-center justify-center md:justify-start gap-1.5">
                 <MapPin className="w-4 h-4" />
                 آدرس و دسترسی:
               </h4>
@@ -759,17 +768,17 @@ export default function App() {
             </div>
 
             {/* Social & Contact */}
-            <div className="space-y-3">
-              <h4 className="font-bold text-xs text-amber-400 flex items-center gap-1.5">
+            <div className="space-y-3 flex flex-col items-center md:items-start">
+              <h4 className="font-bold text-xs text-amber-400 flex items-center justify-center md:justify-start gap-1.5">
                 <Instagram className="w-4 h-4 text-pink-400" />
                 شبکه‌های ارتباطی کافه:
               </h4>
-              <div className="space-y-2">
+              <div className="space-y-2 w-full max-w-xs md:w-auto">
                 <a
                   href="https://instagram.com/p____cafe"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-2 text-xs text-stone-300 hover:text-amber-400 transition-colors p-2 rounded-xl bg-stone-900 border border-stone-800"
+                  className="flex items-center justify-center md:justify-start gap-2 text-xs text-stone-300 hover:text-amber-400 transition-colors p-2.5 rounded-xl bg-stone-900 border border-stone-800"
                 >
                   <Instagram className="w-4 h-4 text-pink-400" />
                   <span className="font-mono" dir="ltr">@p____cafe</span>
@@ -778,9 +787,9 @@ export default function App() {
             </div>
           </div>
 
-          <div className="pt-8 border-t border-stone-900 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-stone-500">
+          <div className="pt-8 border-t border-stone-900 flex flex-col sm:flex-row items-center justify-center sm:justify-between gap-4 text-xs text-stone-500 text-center sm:text-right">
             <p>© {toPersianDigits(1405)} تمامی حقوق برای کافه پی محفوظ است.</p>
-            <p className="flex items-center gap-1.5">
+            <p className="flex items-center justify-center gap-1.5">
               <span>طراحی شده توسط</span>
               <a
                 href="https://t.me/yasinabolfathi"

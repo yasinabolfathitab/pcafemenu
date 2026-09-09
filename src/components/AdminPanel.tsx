@@ -25,6 +25,12 @@ import {
   Volume2,
   VolumeX,
   RotateCcw,
+  Upload,
+  Image as ImageIcon,
+  FileSpreadsheet,
+  Download,
+  FileText,
+  Check,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -56,6 +62,7 @@ import {
   toPersianDigits,
   getStatusDetails,
 } from '../utils/formatters';
+import { exportOrdersToExcel, filterOrdersByTime } from '../utils/excelExport';
 
 interface AdminPanelProps {
   orders: Order[];
@@ -144,6 +151,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [isClearOrdersModalOpen, setIsClearOrdersModalOpen] = useState<boolean>(false);
   const [isClearingOrders, setIsClearingOrders] = useState<boolean>(false);
 
+  // Excel export modal state
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [exportScope, setExportScope] = useState<'filtered' | 'all'>('filtered');
+  const [exportFormat, setExportFormat] = useState<'xls' | 'csv'>('xls');
+  const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
+
   // Stats fetched from backend
   const [statsData, setStatsData] = useState<any>(null);
   const [isLoadingStats, setIsLoadingStats] = useState<boolean>(false);
@@ -154,6 +167,65 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   // Add / Edit Item Modal
   const [isItemModalOpen, setIsItemModalOpen] = useState<boolean>(false);
   const [editingItem, setEditingItem] = useState<MenuItem | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const [isDraggingImage, setIsDraggingImage] = useState<boolean>(false);
+  const [isProcessingImage, setIsProcessingImage] = useState<boolean>(false);
+  const [imageError, setImageError] = useState<string | null>(null);
+
+  const handleImageFileChange = (file: File) => {
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setImageError('لطفاً یک فایل تصویری با فرمت معتبر (JPG, PNG, WEBP) انتخاب فرمایید.');
+      return;
+    }
+    setImageError(null);
+    setIsProcessingImage(true);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new window.Image();
+      img.onload = () => {
+        // Automatically resize and optimize image for fastest loading & storage
+        const maxDim = 800;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+          setFormData((prev) => ({ ...prev, image: compressedDataUrl }));
+        } else {
+          setFormData((prev) => ({ ...prev, image: event.target?.result as string }));
+        }
+        setIsProcessingImage(false);
+      };
+      img.onerror = () => {
+        setImageError('خطا در پردازش تصویر.');
+        setIsProcessingImage(false);
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.onerror = () => {
+      setImageError('خطا در خواندن فایل از سیستم.');
+      setIsProcessingImage(false);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const [formData, setFormData] = useState({
     name: '',
     enName: '',
@@ -214,6 +286,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     }
   };
 
+  const handleTriggerExport = (scope: 'filtered' | 'all' = exportScope, format: 'xls' | 'csv' = exportFormat) => {
+    const targetOrders = scope === 'filtered' 
+      ? filterOrdersByTime(orders, timeFilter)
+      : orders;
+
+    if (targetOrders.length === 0) {
+      alert('هیچ سفارشی در این بازه زمانی برای خروجی اکسل یافت نشد.');
+      return;
+    }
+
+    const timeLabels: Record<TimeFilter, string> = {
+      today: 'امروز (روزانه)',
+      weekly: 'هفته جاری (۷ روز اخیر)',
+      monthly: 'ماه جاری (۳۰ روز اخیر)',
+      yearly: 'سال جاری',
+    };
+
+    const label = scope === 'filtered' 
+      ? `گزارش ${timeLabels[timeFilter]}`
+      : 'آرشیو کامل تمامی فاکتورهای ثبت شده کافه';
+
+    exportOrdersToExcel(targetOrders, {
+      filterLabel: label,
+      cafeName: 'کافه پی (P Cafe)',
+      format,
+    });
+
+    setExportSuccessMsg(`✅ فایل ${format === 'xls' ? 'اکسل (.xls)' : 'CSV'} شامل ${toPersianDigits(targetOrders.length)} سفارش با موفقیت دانلود شد.`);
+    setTimeout(() => setExportSuccessMsg(null), 4500);
+    setIsExportModalOpen(false);
+  };
+
   // Filtered Orders
   const filteredOrders = orders.filter((o) => {
     if (orderFilter === 'all') return true;
@@ -234,6 +338,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Handle Open Create / Edit item
   const openCreateItem = () => {
+    setImageError(null);
+    setIsProcessingImage(false);
     setEditingItem(null);
     setFormData({
       name: '',
@@ -252,6 +358,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   };
 
   const openEditItem = (item: MenuItem) => {
+    setImageError(null);
+    setIsProcessingImage(false);
     setEditingItem(item);
     setFormData({
       name: item.name,
@@ -271,6 +379,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
+    const defaultFallbackImage = 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=600&q=80';
     const payload = {
       name: formData.name,
       enName: formData.enName,
@@ -278,8 +387,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       price: Number(formData.price),
       description: formData.description,
       ingredients: formData.ingredients.split('،').map((s) => s.trim()).filter(Boolean),
-      image: formData.image,
-      prepTime: Number(formData.prepTime),
+      image: formData.image?.trim() || defaultFallbackImage,
+      prepTime: Number(formData.prepTime) || 5,
       isPopular: formData.isPopular,
       isSpecial: formData.isSpecial,
       isAvailable: formData.isAvailable,
@@ -631,14 +740,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       {/* TAB 2: LIVE ANALYTICS & REPORTS */}
       {activeTab === 'analytics' && (
         <div className="space-y-8">
-          {/* Time Filter Pills */}
+          {/* Time Filter & Export Bar */}
           <div className="flex items-center justify-between flex-wrap gap-4 bg-stone-900 p-4 rounded-3xl border border-stone-800">
             <div className="flex items-center gap-2">
               <Calendar className="w-5 h-5 text-amber-400" />
               <span className="font-bold text-sm text-white">بازه زمانی گزارش:</span>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               {[
                 { key: 'today', label: 'گزارش امروز (روزانه)' },
                 { key: 'weekly', label: 'هفته جاری (هفتگی)' },
@@ -657,8 +766,38 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   {tf.label}
                 </button>
               ))}
+
+              {/* Excel Export Button */}
+              <button
+                onClick={() => setIsExportModalOpen(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-lg shadow-emerald-950/40 border border-emerald-500/40 transition-all active:scale-95 cursor-pointer ml-auto sm:ml-0"
+                title="دریافت فایل اکسل فاکتورها و گزارشات"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
+                <span>خروجی اکسل (Excel)</span>
+              </button>
             </div>
           </div>
+
+          {/* Export Success Toast Notification */}
+          {exportSuccessMsg && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="p-3.5 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-bold flex items-center justify-between shadow-lg"
+            >
+              <div className="flex items-center gap-2">
+                <Check className="w-4 h-4 text-emerald-400" />
+                <span>{exportSuccessMsg}</span>
+              </div>
+              <button
+                onClick={() => setExportSuccessMsg(null)}
+                className="text-stone-400 hover:text-stone-200 text-xs"
+              >
+                بستن ✕
+              </button>
+            </motion.div>
+          )}
 
           {/* Key KPI Metrics Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
@@ -927,6 +1066,56 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </PieChart>
                 </ResponsiveContainer>
               </div>
+            </div>
+          </div>
+
+          {/* Excel Export & Management Card */}
+          <div className="bg-gradient-to-r from-stone-900 via-stone-900 to-emerald-950/30 border border-emerald-500/30 rounded-3xl p-6 shadow-xl flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6">
+            <div className="flex items-start gap-4">
+              <div className="p-3.5 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shrink-0">
+                <FileSpreadsheet className="w-8 h-8" />
+              </div>
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <h3 className="font-black text-base text-white">
+                    خروجی اکسل و گزارش آماری سفارشات کافه
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold border border-emerald-500/30">
+                    فرمت رسمی Microsoft Excel &amp; CSV
+                  </span>
+                </div>
+                <p className="text-xs text-stone-300 leading-relaxed max-w-2xl">
+                  دریافت مستقیم فایل اکسل راست‌چین (RTL) فاکتورها شامل شماره فاکتور، تاریخ و ساعت، مشخصات مشتری، شماره میز، جزئیات کامل اقلام و افزودنی‌ها، قیمت‌ها، مبالغ و وضعیت‌ها، آماده برای نرم‌افزارهای حسابداری و بایگانی.
+                </p>
+                <div className="flex items-center gap-4 pt-1 text-[11px] text-stone-400">
+                  <span>📊 تعداد فاکتورهای کل: <strong className="text-amber-400 font-mono">{toPersianDigits(orders.length)}</strong></span>
+                  <span>💰 مجموع کل فروش: <strong className="text-emerald-400 font-mono">{formatPriceToman(orders.reduce((acc, o) => o.status !== 'cancelled' ? acc + o.totalPrice : acc, 0))}</strong></span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 w-full lg:w-auto flex-wrap shrink-0">
+              <button
+                onClick={() => {
+                  setExportScope('filtered');
+                  setExportFormat('xls');
+                  handleTriggerExport('filtered', 'xls');
+                }}
+                className="flex-1 lg:flex-initial flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs shadow-lg shadow-emerald-950/50 transition-all active:scale-95 cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>
+                  دانلود اکسل {timeFilter === 'today' ? 'امروز' : timeFilter === 'weekly' ? 'هفته جاری' : timeFilter === 'monthly' ? 'ماه جاری' : 'سال جاری'}
+                </span>
+              </button>
+
+              <button
+                onClick={() => setIsExportModalOpen(true)}
+                className="flex-1 lg:flex-initial flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-200 font-bold text-xs border border-stone-700 transition-all cursor-pointer"
+              >
+                <Sliders className="w-4 h-4 text-amber-400" />
+                <span>سفارشی‌سازی خروجی</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1273,15 +1462,135 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   </div>
                 </div>
 
-                <div>
-                  <label className="text-xs text-stone-400 block mb-1">آدرس تصویر (Image URL):</label>
-                  <input
-                    required
-                    type="url"
-                    value={formData.image}
-                    onChange={(e) => setFormData({ ...formData, image: e.target.value })}
-                    className="w-full px-3 py-2 rounded-xl bg-stone-950 border border-stone-800 text-xs text-white focus:border-amber-500 focus:outline-none font-mono dir-ltr text-right"
-                  />
+                {/* Image Section: Direct File Upload & URL */}
+                <div className="space-y-3 p-3.5 rounded-2xl bg-stone-950/70 border border-stone-800">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs text-stone-300 font-bold flex items-center gap-1.5">
+                      <ImageIcon className="w-3.5 h-3.5 text-amber-400" />
+                      <span>تصویر آیتم منو:</span>
+                    </label>
+                    <span className="text-[11px] text-stone-400">
+                      (آپلود مستقیم فایل یا لینک اینترنتی)
+                    </span>
+                  </div>
+
+                  {/* Drag & Drop / File Upload Box */}
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIsDraggingImage(true);
+                    }}
+                    onDragLeave={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIsDraggingImage(false);
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setIsDraggingImage(false);
+                      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                        handleImageFileChange(e.dataTransfer.files[0]);
+                      }
+                    }}
+                    onClick={() => fileInputRef.current?.click()}
+                    className={`border-2 border-dashed rounded-2xl p-4 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-2 ${
+                      isDraggingImage
+                        ? 'border-amber-400 bg-amber-500/10'
+                        : 'border-stone-800 hover:border-amber-500/50 bg-stone-900/50 hover:bg-stone-900'
+                    }`}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/png, image/jpeg, image/webp, image/gif"
+                      className="hidden"
+                      onChange={(e) => {
+                        if (e.target.files && e.target.files[0]) {
+                          handleImageFileChange(e.target.files[0]);
+                        }
+                      }}
+                    />
+
+                    {isProcessingImage ? (
+                      <div className="flex items-center gap-2 py-2 text-amber-400 text-xs font-bold">
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>در حال بهینه‌سازی و ذخیره تصویر...</span>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="w-10 h-10 rounded-2xl bg-amber-500/10 text-amber-400 flex items-center justify-center border border-amber-500/20">
+                          <Upload className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xs font-bold text-stone-200">
+                            کلیک برای انتخاب عکس از سیستم یا گوشی
+                          </p>
+                          <p className="text-[11px] text-stone-400 mt-0.5">
+                            یا عکس را بکشید و در این کادر رها کنید (PNG, JPG, WebP)
+                          </p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {imageError && (
+                    <p className="text-xs text-rose-400 bg-rose-950/40 p-2 rounded-xl border border-rose-900/50">
+                      {imageError}
+                    </p>
+                  )}
+
+                  {/* Or Enter Image URL */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] text-stone-400">یا نشانی مستقیم تصویر در اینترنت (Image URL):</span>
+                      {formData.image && formData.image.startsWith('data:') && (
+                        <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                          عکس از سیستم آپلود شده است ✓
+                        </span>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      value={formData.image.startsWith('data:') ? 'عکس بارگذاری شده از سیستم (Base64 Data)' : formData.image}
+                      onChange={(e) => setFormData({ ...formData, image: e.target.value })}
+                      placeholder="https://images.unsplash.com/..."
+                      className="w-full px-3 py-2 rounded-xl bg-stone-900 border border-stone-800 text-xs text-white focus:border-amber-500 focus:outline-none font-mono dir-ltr text-right"
+                    />
+                  </div>
+
+                  {/* Live Image Preview */}
+                  {formData.image && (
+                    <div className="flex items-center gap-3 p-2.5 rounded-xl bg-stone-900/90 border border-stone-800">
+                      <img
+                        src={formData.image}
+                        alt="پیش‌نمایش تصویر"
+                        className="w-14 h-14 rounded-xl object-cover border border-stone-700 shadow-md"
+                        referrerPolicy="no-referrer"
+                      />
+                      <div className="flex-1 min-w-0 text-right">
+                        <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>تصویر انتخاب شده و فعال است</span>
+                        </div>
+                        <p className="text-[11px] text-stone-400 truncate mt-0.5 dir-ltr text-right">
+                          {formData.image.startsWith('data:') ? 'عکس آپلود شده (فشرده و بهینه‌شده)' : formData.image}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFormData({ ...formData, image: '' });
+                          if (fileInputRef.current) fileInputRef.current.value = '';
+                        }}
+                        className="p-2 rounded-xl bg-stone-800 hover:bg-rose-950 hover:text-rose-400 text-stone-400 transition-colors"
+                        title="حذف تصویر"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div>
@@ -1402,6 +1711,214 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                       <span>بله، پاکسازی کن</span>
                     </>
                   )}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Excel Export Configuration Modal */}
+        {isExportModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsExportModalOpen(false)}
+              className="fixed inset-0 bg-black/80 backdrop-blur-md"
+            />
+
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="relative w-full max-w-lg bg-stone-900 border border-emerald-500/40 rounded-3xl p-6 shadow-2xl z-10 space-y-6"
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-stone-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                    <FileSpreadsheet className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black text-white">
+                      دریافت خروجی اکسل سفارشات و فروش
+                    </h3>
+                    <p className="text-xs text-stone-400">
+                      تنظیم محدوده فاکتورها و فرمت فایل خروجی
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsExportModalOpen(false)}
+                  className="w-8 h-8 rounded-full bg-stone-800 text-stone-400 hover:text-white flex items-center justify-center text-xs transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Scope Selection */}
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-stone-300 block">
+                  ۱. محدوده سفارشات مورد نظر برای خروجی:
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setExportScope('filtered')}
+                    className={`p-4 rounded-2xl border text-right transition-all flex flex-col justify-between gap-2 ${
+                      exportScope === 'filtered'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 shadow-md shadow-emerald-950'
+                        : 'bg-stone-800/60 border-stone-700/60 text-stone-300 hover:bg-stone-800'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-bold text-xs">
+                        بازه انتخابی فعال (
+                        {timeFilter === 'today'
+                          ? 'امروز'
+                          : timeFilter === 'weekly'
+                          ? 'هفته جاری'
+                          : timeFilter === 'monthly'
+                          ? 'ماه جاری'
+                          : 'سال جاری'}
+                        )
+                      </span>
+                      <div
+                        className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                          exportScope === 'filtered'
+                            ? 'border-emerald-400 bg-emerald-500 text-stone-950'
+                            : 'border-stone-600'
+                        }`}
+                      >
+                        {exportScope === 'filtered' && <Check className="w-3 h-3 stroke-[3]" />}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-stone-400">
+                      {toPersianDigits(filterOrdersByTime(orders, timeFilter).length)} سفارش در این دوره
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setExportScope('all')}
+                    className={`p-4 rounded-2xl border text-right transition-all flex flex-col justify-between gap-2 ${
+                      exportScope === 'all'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300 shadow-md shadow-emerald-950'
+                        : 'bg-stone-800/60 border-stone-700/60 text-stone-300 hover:bg-stone-800'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between w-full">
+                      <span className="font-bold text-xs">تمام فاکتورهای کافه</span>
+                      <div
+                        className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                          exportScope === 'all'
+                            ? 'border-emerald-400 bg-emerald-500 text-stone-950'
+                            : 'border-stone-600'
+                        }`}
+                      >
+                        {exportScope === 'all' && <Check className="w-3 h-3 stroke-[3]" />}
+                      </div>
+                    </div>
+                    <div className="text-[11px] text-stone-400">
+                      {toPersianDigits(orders.length)} سفارش (کل تاریخچه)
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Format Selection */}
+              <div className="space-y-3">
+                <label className="text-xs font-bold text-stone-300 block">
+                  ۲. فرمت فایل خروجی:
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('xls')}
+                    className={`p-4 rounded-2xl border text-right transition-all flex items-start gap-3 ${
+                      exportFormat === 'xls'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300'
+                        : 'bg-stone-800/60 border-stone-700/60 text-stone-300 hover:bg-stone-800'
+                    }`}
+                  >
+                    <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400 shrink-0">
+                      <FileSpreadsheet className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-bold text-xs text-white">فایل اکسل (.xls)</div>
+                      <div className="text-[11px] text-stone-400 mt-1">
+                        راست‌چین خودکار، سرستون‌های رنگی، مناسب باز شدن مستقیم در Excel
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('csv')}
+                    className={`p-4 rounded-2xl border text-right transition-all flex items-start gap-3 ${
+                      exportFormat === 'csv'
+                        ? 'bg-emerald-950/40 border-emerald-500 text-emerald-300'
+                        : 'bg-stone-800/60 border-stone-700/60 text-stone-300 hover:bg-stone-800'
+                    }`}
+                  >
+                    <div className="p-2 rounded-xl bg-sky-500/20 text-sky-400 shrink-0">
+                      <FileText className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="font-bold text-xs text-white">فایل متنی (.csv)</div>
+                      <div className="text-[11px] text-stone-400 mt-1">
+                        کدگذاری UTF-8 با BOM، مناسب انواع نرم‌افزارهای حسابداری
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* Data Preview Summary */}
+              {(() => {
+                const targetList =
+                  exportScope === 'filtered'
+                    ? filterOrdersByTime(orders, timeFilter)
+                    : orders;
+                const totalSum = targetList.reduce(
+                  (sum, o) => (o.status !== 'cancelled' ? sum + o.totalPrice : sum),
+                  0
+                );
+                return (
+                  <div className="p-4 rounded-2xl bg-stone-950 border border-stone-800 flex items-center justify-between text-xs">
+                    <div className="space-y-1">
+                      <span className="text-stone-400 block">فاکتورهای آماده خروجی:</span>
+                      <strong className="text-white font-mono text-sm">
+                        {toPersianDigits(targetList.length)} سفارش
+                      </strong>
+                    </div>
+                    <div className="space-y-1 text-left">
+                      <span className="text-stone-400 block">مجموع مبلغ فروش:</span>
+                      <strong className="text-emerald-400 font-mono text-sm">
+                        {formatPriceToman(totalSum)}
+                      </strong>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Action Buttons */}
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(false)}
+                  className="px-5 py-3 rounded-2xl bg-stone-800 hover:bg-stone-700 text-stone-300 text-xs font-bold transition-all"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleTriggerExport(exportScope, exportFormat)}
+                  className="flex-1 py-3 rounded-2xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black shadow-lg shadow-emerald-950/60 transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>دانلود و ذخیره فایل اکسل</span>
                 </button>
               </div>
             </motion.div>
