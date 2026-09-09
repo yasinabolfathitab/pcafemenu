@@ -1,5 +1,6 @@
 import { MenuItem, Order, OrderStatus } from '../types';
 import { INITIAL_MENU_ITEMS } from '../data/initialMenu';
+import { getInitialSeedOrders } from '../data/initialOrders';
 import {
   collection,
   doc,
@@ -48,12 +49,16 @@ export function getLocalOrders(): Order[] {
     const raw = localStorage.getItem(LOCAL_STORAGE_ORDERS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length === 0) return [];
     }
   } catch (e) {
     console.warn('Error reading local orders:', e);
   }
-  return [];
+  // Initialize with seed orders on fresh startup/deploy
+  const initial = getInitialSeedOrders();
+  saveLocalOrders(initial);
+  return initial;
 }
 
 export function saveLocalOrders(orders: Order[]) {

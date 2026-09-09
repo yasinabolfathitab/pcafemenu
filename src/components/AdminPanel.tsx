@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { calculateAnalytics } from '../utils/analytics';
 import {
   Coffee,
   DollarSign,
@@ -157,9 +158,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   const [exportFormat, setExportFormat] = useState<'xls' | 'csv'>('xls');
   const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
 
-  // Stats fetched from backend
-  const [statsData, setStatsData] = useState<any>(null);
+  // Real-time client analytics calculated directly from orders and menu catalog
+  // Ensures 100% full availability on Cloudflare Pages and static serverless environments
+  const clientAnalytics = useMemo(() => {
+    return calculateAnalytics(orders, menuItems);
+  }, [orders, menuItems]);
+
+  // Optional server-side stats cache
+  const [serverStatsData, setServerStatsData] = useState<any>(null);
   const [isLoadingStats, setIsLoadingStats] = useState<boolean>(false);
+
+  // statsData always falls back to real-time client analytics when deployed on Cloudflare Pages
+  const statsData = serverStatsData || clientAnalytics;
 
   // Database action response feedback
   const [dbActionStatus, setDbActionStatus] = useState<string | null>(null);
@@ -245,11 +255,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     try {
       const res = await fetch('/api/stats');
       if (res.ok) {
-        const data = await res.json();
-        setStatsData(data);
+        const contentType = res.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const data = await res.json();
+          if (data && data.summary) {
+            setServerStatsData(data);
+          }
+        }
       }
-    } catch (e) {
-      console.error(e);
+    } catch {
+      // Deployed on Cloudflare Pages / static hosting:
+      // Gracefully rely on real-time clientAnalytics!
     } finally {
       setIsLoadingStats(false);
     }
@@ -902,8 +918,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 </span>
               </div>
 
-              <div className="h-72 w-full pt-4" dir="ltr">
-                <ResponsiveContainer width="100%" height="100%">
+              <div className="h-72 min-h-[280px] w-full pt-4" dir="ltr">
+                <ResponsiveContainer width="100%" height="100%" minHeight={250}>
                   <AreaChart
                     data={
                       timeFilter === 'monthly' || timeFilter === 'yearly'
@@ -1000,8 +1016,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 بررسی ساعات شلوغی و خلوتی کافه (۸ صبح تا ۱۱ شب)
               </p>
 
-              <div className="h-64 w-full pt-4" dir="ltr">
-                <ResponsiveContainer width="100%" height="100%">
+              <div className="h-64 min-h-[250px] w-full pt-4" dir="ltr">
+                <ResponsiveContainer width="100%" height="100%" minHeight={220}>
                   <BarChart data={statsData?.hourlyDistribution || []}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#292524" />
                     <XAxis dataKey="hour" stroke="#78716c" fontSize={10} />
@@ -1031,14 +1047,17 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                 توزیع درآمد بین بار گرم، بار سرد، کیک و دسر و سایر بخش‌ها
               </p>
 
-              <div className="h-64 w-full flex items-center justify-center">
-                <ResponsiveContainer width="100%" height="100%">
+              <div className="h-64 min-h-[250px] w-full flex items-center justify-center">
+                <ResponsiveContainer width="100%" height="100%" minHeight={220}>
                   <PieChart>
                     <Pie
-                      data={CATEGORIES.map((cat, i) => ({
-                        name: cat.name,
-                        value: (i + 1) * 15 + (i === 0 ? 30 : 0),
-                      }))}
+                      data={
+                        statsData?.categoryDistribution ||
+                        CATEGORIES.map((cat, i) => ({
+                          name: cat.name,
+                          value: (i + 1) * 15 + (i === 0 ? 30 : 0),
+                        }))
+                      }
                       cx="50%"
                       cy="50%"
                       innerRadius={60}
