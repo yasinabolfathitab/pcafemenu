@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Search, Sparkles, Flame, Coffee, GlassWater, Cake, UtensilsCrossed, CupSoda, Heart, Award, ArrowLeft } from 'lucide-react';
+import { Search, Sparkles, Flame, Coffee, GlassWater, Cake, UtensilsCrossed, CupSoda, Heart, Award, ArrowLeft, Cookie, Layers } from 'lucide-react';
 import { MenuItem, CategoryId, Category } from '../types';
 import { CATEGORIES } from '../data/initialMenu';
 import { MenuItemCard } from './MenuItemCard';
@@ -31,6 +31,9 @@ export const MenuSection: React.FC<MenuSectionProps> = ({
       case 'Cake': return Cake;
       case 'UtensilsCrossed': return UtensilsCrossed;
       case 'CupSoda': return CupSoda;
+      case 'Cookie': return Cookie;
+      case 'Layers': return Layers;
+      case 'Flame': return Flame;
       default: return Coffee;
     }
   };
@@ -171,7 +174,7 @@ export const MenuSection: React.FC<MenuSectionProps> = ({
           </span>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-2.5">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9 gap-2.5">
           {/* All Button */}
           <motion.button
             whileHover={{ scale: 1.02 }}

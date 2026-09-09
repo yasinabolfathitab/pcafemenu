@@ -311,7 +311,15 @@ export async function fetchMenuApi(): Promise<MenuItem[]> {
     const local = localStorage.getItem(LOCAL_STORAGE_MENU_KEY);
     if (local) {
       const parsed = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length >= INITIAL_MENU_ITEMS.length) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Always ensure newly added menu items from INITIAL_MENU_ITEMS are merged with existing user edits
+        const fullMap = new Map<string, MenuItem>();
+        for (const it of INITIAL_MENU_ITEMS) fullMap.set(it.id, it);
+        for (const it of parsed) fullMap.set(it.id, it);
+        const combined = Array.from(fullMap.values());
+        localStorage.setItem(LOCAL_STORAGE_MENU_KEY, JSON.stringify(combined));
+        return combined;
+      }
     }
   } catch {}
 

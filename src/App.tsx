@@ -13,6 +13,7 @@ import { OrderStatusTracker } from './components/OrderStatusTracker';
 import { AdminLoginModal } from './components/AdminLoginModal';
 import { AdminPanel } from './components/AdminPanel';
 import { FloatingCartButton } from './components/FloatingCartButton';
+import { ScrollToTopButton } from './components/ScrollToTopButton';
 import { MenuItem, CartItem, CartItemOption, Order, OrderStatus } from './types';
 import { INITIAL_MENU_ITEMS } from './data/initialMenu';
 import { Coffee, MapPin, Phone, Instagram, Send, Heart, Clock, ShoppingBag, ShieldCheck } from 'lucide-react';
@@ -701,6 +702,9 @@ export default function App() {
         onOpenCart={() => setIsCartOpen(true)}
         activeTab={activeTab}
       />
+
+      {/* Floating Scroll to Top Button (Smooth scrolling on Mobile) */}
+      <ScrollToTopButton cartCount={cartCount} />
 
       {/* Toast Notification Alert */}
       <AnimatePresence>

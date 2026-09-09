@@ -172,12 +172,18 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                         exit={{ opacity: 0, scale: 0.9 }}
                         className="p-3.5 rounded-2xl bg-stone-950/70 border border-stone-800 flex items-center gap-3"
                       >
-                        <img
-                          src={ci.menuItem.image}
-                          alt={ci.menuItem.name}
-                          className="w-14 h-14 rounded-xl object-cover"
-                          referrerPolicy="no-referrer"
-                        />
+                        {ci.menuItem.image ? (
+                          <img
+                            src={ci.menuItem.image}
+                            alt={ci.menuItem.name}
+                            className="w-14 h-14 rounded-xl object-cover border border-stone-800 shrink-0"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <div className="w-14 h-14 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0">
+                            <Coffee className="w-6 h-6 stroke-1" />
+                          </div>
+                        )}
                         <div className="flex-1 min-w-0">
                           <h5 className="font-bold text-xs sm:text-sm text-white truncate">
                             {ci.menuItem.name}

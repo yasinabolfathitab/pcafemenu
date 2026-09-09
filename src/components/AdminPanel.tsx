@@ -32,6 +32,7 @@ import {
   Download,
   FileText,
   Check,
+  X,
 } from 'lucide-react';
 import {
   AreaChart,
@@ -364,7 +365,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       price: 85000,
       description: '',
       ingredients: '',
-      image: 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=600&q=80',
+      image: '',
       prepTime: 5,
       isPopular: false,
       isSpecial: false,
@@ -384,7 +385,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       price: item.price,
       description: item.description,
       ingredients: item.ingredients ? item.ingredients.join('، ') : '',
-      image: item.image,
+      image: item.image || '',
       prepTime: item.prepTime,
       isPopular: !!item.isPopular,
       isSpecial: !!item.isSpecial,
@@ -395,7 +396,6 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   const handleSaveItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    const defaultFallbackImage = 'https://images.unsplash.com/photo-1514432324607-a09d9b4aefdd?auto=format&fit=crop&w=600&q=80';
     const payload = {
       name: formData.name,
       enName: formData.enName,
@@ -403,7 +403,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       price: Number(formData.price),
       description: formData.description,
       ingredients: formData.ingredients.split('،').map((s) => s.trim()).filter(Boolean),
-      image: formData.image?.trim() || defaultFallbackImage,
+      image: formData.image ? formData.image.trim() : '',
       prepTime: Number(formData.prepTime) || 5,
       isPopular: formData.isPopular,
       isSpecial: formData.isSpecial,
@@ -1227,12 +1227,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   {filteredMenuItems.map((item) => (
                     <tr key={item.id} className="hover:bg-stone-800/40 transition-colors">
                       <td className="p-4 flex items-center gap-3">
-                        <img
-                          src={item.image}
-                          alt={item.name}
-                          className="w-12 h-12 rounded-xl object-cover"
-                          referrerPolicy="no-referrer"
-                        />
+                        {item.image ? (
+                          <img
+                            src={item.image}
+                            alt={item.name}
+                            className="w-12 h-12 rounded-xl object-cover border border-stone-800 shrink-0"
+                            referrerPolicy="no-referrer"
+                          />
+                        ) : (
+                          <button
+                            onClick={() => openEditItem(item)}
+                            className="w-12 h-12 rounded-xl bg-amber-500/10 border border-dashed border-amber-500/40 hover:bg-amber-500/20 text-amber-400 flex flex-col items-center justify-center text-[9px] font-bold gap-0.5 transition-all shrink-0 group"
+                            title="کلیک برای بارگذاری تصویر"
+                          >
+                            <Upload className="w-4 h-4 text-amber-400 group-hover:scale-110 transition-transform" />
+                            <span>+عکس</span>
+                          </button>
+                        )}
                         <div>
                           <div className="font-bold text-white text-sm">{item.name}</div>
                           <div className="text-[11px] text-stone-400 font-mono">{item.enName}</div>
@@ -1408,7 +1419,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       {/* Item Create / Edit Modal */}
       <AnimatePresence>
         {isItemModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-hidden">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
@@ -1418,16 +1429,40 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             />
 
             <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.95 }}
-              className="relative w-full max-w-lg bg-stone-900 border border-stone-800 rounded-3xl p-6 shadow-2xl z-10 my-8"
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="relative w-full max-w-lg max-h-[92dvh] sm:max-h-[88vh] bg-stone-900 border border-stone-800 rounded-3xl shadow-2xl z-10 flex flex-col overflow-hidden"
             >
-              <h3 className="text-xl font-black text-white mb-4">
-                {editingItem ? 'ویرایش آیتم منو' : 'افزودن آیتم جدید به منو'}
-              </h3>
+              {/* Modal Fixed Header */}
+              <div className="p-4 sm:p-5 border-b border-stone-800/90 flex items-center justify-between bg-stone-900/95 backdrop-blur-md shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <Coffee className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base sm:text-lg font-black text-white">
+                      {editingItem ? 'ویرایش آیتم منو' : 'افزودن آیتم جدید به منو'}
+                    </h3>
+                    <p className="text-[11px] text-stone-400">
+                      {editingItem ? editingItem.name : 'مشخصات، قیمت و تصویر محصول'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsItemModalOpen(false)}
+                  className="w-8 h-8 rounded-full bg-stone-800 hover:bg-stone-700 text-stone-400 hover:text-white flex items-center justify-center transition-colors text-sm"
+                  title="بستن پنجره"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
 
-              <form onSubmit={handleSaveItem} className="space-y-4">
+              {/* Form with Scrollable Content Body and Sticky Footer */}
+              <form onSubmit={handleSaveItem} className="flex flex-col flex-1 min-h-0 overflow-hidden">
+                {/* Scrollable Form Body */}
+                <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4 overscroll-contain">
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-xs text-stone-400 block mb-1">نام فارسی:</label>
@@ -1657,20 +1692,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                     <span>پیشنهاد ویژه P Cafe</span>
                   </label>
                 </div>
+                </div>
 
-                <div className="flex items-center justify-end gap-3 pt-4 border-t border-stone-800">
+                {/* Modal Fixed Footer */}
+                <div className="p-3.5 sm:px-6 sm:py-4 border-t border-stone-800 bg-stone-900/95 backdrop-blur-md flex items-center justify-end gap-3 shrink-0">
                   <button
                     type="button"
                     onClick={() => setIsItemModalOpen(false)}
-                    className="px-4 py-2.5 rounded-xl bg-stone-800 text-stone-300 hover:bg-stone-700 text-xs font-bold"
+                    className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-stone-300 text-xs font-bold transition-all"
                   >
                     انصراف
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs shadow-lg shadow-amber-500/20"
+                    className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-stone-950 font-black text-xs shadow-lg shadow-amber-500/20 transition-all"
                   >
-                    ذخیره تغییرات
+                    {editingItem ? 'ذخیره تغییرات' : 'افزودن به منو'}
                   </button>
                 </div>
               </form>
@@ -1751,7 +1788,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
               initial={{ opacity: 0, scale: 0.95, y: 10 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="relative w-full max-w-lg bg-stone-900 border border-emerald-500/40 rounded-3xl p-6 shadow-2xl z-10 space-y-6"
+              className="relative w-full max-w-lg max-h-[92dvh] overflow-y-auto bg-stone-900 border border-emerald-500/40 rounded-3xl p-6 shadow-2xl z-10 space-y-6"
             >
               {/* Header */}
               <div className="flex items-center justify-between border-b border-stone-800 pb-4">

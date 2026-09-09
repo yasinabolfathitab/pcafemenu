@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Plus, Clock, Flame, Sparkles, Check, Heart, Eye } from 'lucide-react';
+import { Plus, Clock, Flame, Sparkles, Check, Heart, Eye, Coffee } from 'lucide-react';
 import { MenuItem } from '../types';
 import { formatPriceToman, toPersianDigits } from '../utils/formatters';
 
@@ -67,15 +67,25 @@ export const MenuItemCard: React.FC<MenuItemCardProps> = ({
         }`}
       >
         {/* Top Image Container */}
-        <div className="relative h-48 sm:h-52 w-full overflow-hidden bg-stone-900">
-          <img
-            src={item.image}
-            alt={item.name}
-            className="w-full h-full object-cover transition-transform duration-700 hover:scale-110"
-            loading="lazy"
-            referrerPolicy="no-referrer"
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-stone-950 via-stone-950/20 to-transparent" />
+        <div className="relative h-48 sm:h-52 w-full overflow-hidden bg-stone-900 flex items-center justify-center">
+          {item.image ? (
+            <img
+              src={item.image}
+              alt={item.name}
+              className="w-full h-full object-cover transition-transform duration-700 hover:scale-110"
+              loading="lazy"
+              referrerPolicy="no-referrer"
+            />
+          ) : (
+            <div className="w-full h-full flex flex-col items-center justify-center p-4 text-center bg-gradient-to-br from-stone-850 via-stone-900 to-stone-950 border-b border-stone-800/80">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mb-2 shadow-inner group-hover:scale-110 transition-transform">
+                <Coffee className="w-7 h-7 stroke-[1.5]" />
+              </div>
+              <span className="text-[12px] font-black text-amber-400/90 tracking-wider">P CAFE</span>
+              <span className="text-[10px] text-stone-400 mt-1">آماده بارگذاری تصویر از پنل مدیریت</span>
+            </div>
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-stone-950 via-stone-950/20 to-transparent pointer-events-none" />
 
           {/* Badges */}
           <div className="absolute top-3 right-3 flex flex-col gap-1.5 z-10">

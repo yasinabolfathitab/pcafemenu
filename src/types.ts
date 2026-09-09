@@ -1,10 +1,14 @@
 export type CategoryId = 
   | 'hot-coffee'
   | 'cold-coffee'
-  | 'mocktails'
+  | 'milk-chocolate'
+  | 'shakes'
+  | 'tea-infusions'
   | 'cakes-desserts'
-  | 'food-snacks'
-  | 'tea-infusions';
+  | 'cookies'
+  | 'puffy'
+  | 'mocktails'
+  | 'food-snacks';
 
 export interface Category {
   id: CategoryId;

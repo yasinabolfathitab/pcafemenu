@@ -74,14 +74,24 @@ export const ItemDetailModal: React.FC<ItemDetailModalProps> = ({
           </button>
 
           {/* Hero Image */}
-          <div className="relative h-60 w-full overflow-hidden bg-stone-950">
-            <img
-              src={item.image}
-              alt={item.name}
-              className="w-full h-full object-cover"
-              referrerPolicy="no-referrer"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-stone-900 via-stone-900/30 to-transparent" />
+          <div className="relative h-60 w-full overflow-hidden bg-stone-950 flex items-center justify-center">
+            {item.image ? (
+              <img
+                src={item.image}
+                alt={item.name}
+                className="w-full h-full object-cover"
+                referrerPolicy="no-referrer"
+              />
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-gradient-to-br from-stone-850 via-stone-900 to-stone-950">
+                <div className="w-16 h-16 rounded-3xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 mb-2 shadow-inner">
+                  <Coffee className="w-8 h-8 stroke-[1.5]" />
+                </div>
+                <span className="text-sm font-black text-amber-400 tracking-wider">P CAFE SPECIALTY</span>
+                <span className="text-xs text-stone-400 mt-1">آماده بارگذاری تصویر از پنل مدیریت</span>
+              </div>
+            )}
+            <div className="absolute inset-0 bg-gradient-to-t from-stone-900 via-stone-900/30 to-transparent pointer-events-none" />
 
             <div className="absolute bottom-4 right-4 left-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
